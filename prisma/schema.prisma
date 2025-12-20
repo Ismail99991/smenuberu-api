@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  displayName String?
+
+  bookings         Booking[]
+  reputationEvents ReputationEvent[]
+  feedbacks        Feedback[]
+}
+
+model Object {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  name    String
+  city    String
+  address String?
+
+  slots     Slot[]
+  feedbacks Feedback[]
+}
+
+model Slot {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  objectId String
+  object   Object @relation(fields: [objectId], references: [id])
+
+  date      DateTime
+  startTime DateTime
+  endTime   DateTime
+
+  title String
+  pay   Int
+  type  TaskType
+  hot   Boolean  @default(false)
+
+  bookings  Booking[]
+  feedbacks Feedback[]
+}
+
+model Booking {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  slotId String
+  slot   Slot   @relation(fields: [slotId], references: [id])
+
+  status BookingStatus
+
+  @@index([userId, status])
+  @@index([slotId])
+}
+
+model Feedback {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  slotId String
+  slot   Slot   @relation(fields: [slotId], references: [id])
+
+  objectId String
+  object   Object @relation(fields: [objectId], references: [id])
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  rating  Int
+  comment String?
+}
+
+model ReputationEvent {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  type   ReputationEventType
+  value  Int
+  reason String?
+}
+
+enum TaskType {
+  driver
+  picker
+  loader
+  cook
+  waiter
+  cleaner
+  other
+}
+
+enum BookingStatus {
+  none
+  booked
+  cancelled
+  completed
+}
+
+enum ReputationEventType {
+  completed_shift
+  late_cancel
+  no_show
+  late
+  performance_high
+  performance_low
+}
