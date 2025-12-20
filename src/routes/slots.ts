@@ -23,7 +23,7 @@ export const slotsRoutes: FastifyPluginAsync = async (app) => {
     return slots;
   });
 
-  app.get("/ui", async (req) => {
+app.get("/ui", async (req) => {
   const query = z
     .object({
       from: z.string().optional(), // YYYY-MM-DD or ISO
@@ -46,7 +46,7 @@ export const slotsRoutes: FastifyPluginAsync = async (app) => {
 
   const toHHMM = (d: Date) => `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
 
-  return rows.map((s) => ({
+  return rows.map((s: (typeof rows)[number]) => ({
     id: s.id,
     date: toISODate(s.date),
     title: s.title,
@@ -60,6 +60,7 @@ export const slotsRoutes: FastifyPluginAsync = async (app) => {
     type: s.type,
   }));
 });
+
 
   app.get("/:id", async (req, reply) => {
     const { id } = z.object({ id: z.string() }).parse(req.params);
