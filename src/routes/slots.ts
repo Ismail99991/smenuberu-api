@@ -1,76 +1,178 @@
-import type { FastifyPluginAsync } from "fastify";
-import { z } from "zod";
-import { prisma } from "../prisma";
+import type { FastifyInstance } from "fastify";
 
-export const slotsRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/", async (req) => {
-    const query = z
-      .object({
-        from: z.string().optional(),
-        to: z.string().optional(),
-      })
-      .parse(req.query);
+/**
+ * Helpers
+ */
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
 
-    const from = query.from ? new Date(query.from) : undefined;
-    const to = query.to ? new Date(query.to) : undefined;
+function fmtISODateUTC(dt: Date) {
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+}
 
-    const slots = await prisma.slot.findMany({
-      where: from && to ? { date: { gte: from, lte: to } } : undefined,
-      include: { object: true },
+function fmtTimeUTC(dt: Date) {
+  return `${pad2(dt.getUTCHours())}:${pad2(dt.getUTCMinutes())}`;
+}
+
+function parseISODate(iso: string) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return null;
+  return { y: +m[1], m: +m[2], d: +m[3] };
+}
+
+function parseTimeHHMM(t: string) {
+  const m = /^(\d{2}):(\d{2})$/.exec(t);
+  if (!m) return null;
+  return { h: +m[1], m: +m[2] };
+}
+
+function toUtcDateTime(date: string, time: string) {
+  const d = parseISODate(date);
+  const t = parseTimeHHMM(time);
+  if (!d || !t) return null;
+  return new Date(Date.UTC(d.y, d.m - 1, d.d, t.h, t.m, 0));
+}
+
+export async function slotsRoutes(app: FastifyInstance) {
+  /**
+   * GET /slots
+   * (админка)
+   */
+  app.get("/", async () => {
+    // @ts-expect-error prisma is injected globally
+    const prisma = app.prisma;
+
+    const rows = await prisma.slot.findMany({
+      orderBy: [{ date: "desc" }, { startTime: "asc" }],
+      include: { object: true }
+    });
+
+    return rows.map((s: any) => ({
+      id: s.id,
+      date: fmtISODateUTC(s.date),
+      title: s.title,
+      company: s.object.name,
+      city: s.object.city,
+      address: s.object.address,
+      time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
+      pay: s.pay,
+      hot: s.hot,
+      type: s.type
+    }));
+  });
+
+  /**
+   * GET /slots/ui
+   * (web)
+   */
+  app.get("/ui", async () => {
+    // @ts-expect-error prisma is injected globally
+    const prisma = app.prisma;
+
+    const rows = await prisma.slot.findMany({
       orderBy: [{ date: "asc" }, { startTime: "asc" }],
+      include: { object: true }
     });
 
-    return slots;
+    return rows.map((s: any) => ({
+      id: s.id,
+      date: fmtISODateUTC(s.date),
+      title: s.title,
+      company: s.object.name,
+      city: s.object.city,
+      address: s.object.address,
+      time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
+      pay: s.pay,
+      hot: s.hot,
+      tags: [],
+      type: s.type
+    }));
   });
 
-app.get("/ui", async (req) => {
-  const query = z
-    .object({
-      from: z.string().optional(), // YYYY-MM-DD or ISO
-      to: z.string().optional(),
-    })
-    .parse(req.query);
-
-  const from = query.from ? new Date(query.from) : undefined;
-  const to = query.to ? new Date(query.to) : undefined;
-
-  const rows = await prisma.slot.findMany({
-    where: from && to ? { date: { gte: from, lte: to } } : undefined,
-    include: { object: true },
-    orderBy: [{ date: "asc" }, { startTime: "asc" }],
-  });
-
-  const pad2 = (n: number) => String(n).padStart(2, "0");
-  const toISODate = (d: Date) =>
-    `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-
-  const toHHMM = (d: Date) => `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
-
-  return rows.map((s: (typeof rows)[number]) => ({
-    id: s.id,
-    date: toISODate(s.date),
-    title: s.title,
-    company: s.object.name,
-    city: s.object.city,
-    address: s.object.address ?? "",
-    time: `${toHHMM(s.startTime)}–${toHHMM(s.endTime)}`,
-    pay: s.pay,
-    hot: s.hot,
-    tags: [] as string[],
-    type: s.type,
-  }));
-});
-
-
+  /**
+   * GET /slots/:id
+   */
   app.get("/:id", async (req, reply) => {
-    const { id } = z.object({ id: z.string() }).parse(req.params);
+    // @ts-expect-error prisma is injected globally
+    const prisma = app.prisma;
+    const { id } = req.params as any;
 
-    const slot = await prisma.slot.findUnique({
+    const s = await prisma.slot.findUnique({
       where: { id },
-      include: { object: true },
+      include: { object: true }
     });
 
-    if (!slot) return reply.code(404).send({ error: "Slot not found" });
-    return slot;
+    if (!s) return reply.code(404).send({ ok: false });
+
+    return {
+      id: s.id,
+      date: fmtISODateUTC(s.date),
+      title: s.title,
+      company: s.object.name,
+      city: s.object.city,
+      address: s.object.address,
+      time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
+      pay: s.pay,
+      hot: s.hot,
+      type: s.type
+    };
   });
-};
+
+  /**
+   * POST /slots
+   * (создание смены)
+   */
+  app.post("/", async (req, reply) => {
+    // @ts-expect-error prisma is injected globally
+    const prisma = app.prisma;
+    const body = req.body as any;
+
+    const {
+      objectId,
+      title,
+      date,
+      startTime,
+      endTime,
+      pay,
+      type,
+      hot = false
+    } = body;
+
+    if (!objectId || !title || !date || !startTime || !endTime || pay == null || !type) {
+      return reply.code(400).send({ error: "invalid payload" });
+    }
+
+    const dateUTC = toUtcDateTime(date, "00:00");
+    const startUTC = toUtcDateTime(date, startTime);
+    const endUTC = toUtcDateTime(date, endTime);
+
+    if (!dateUTC || !startUTC || !endUTC || endUTC <= startUTC) {
+      return reply.code(400).send({ error: "invalid date/time" });
+    }
+
+    const exists = await prisma.object.findUnique({
+      where: { id: objectId },
+      select: { id: true }
+    });
+
+    if (!exists) {
+      return reply.code(400).send({ error: "object not found" });
+    }
+
+    const created = await prisma.slot.create({
+      data: {
+        objectId,
+        title,
+        date: dateUTC,
+        startTime: startUTC,
+        endTime: endUTC,
+        pay: Number(pay),
+        type,
+        hot: Boolean(hot)
+      }
+    });
+
+    return reply.code(201).send(created);
+  });
+}
