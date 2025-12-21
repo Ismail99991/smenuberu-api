@@ -32,6 +32,11 @@ export function buildApp() {
   app.register(slotsRoutes, { prefix: "/slots" });
   app.register(bookingsRoutes, { prefix: "/bookings" });
 
+  app.ready(() => {
+  app.log.info(app.printRoutes());
+});
+
+
   app.addHook("onClose", async () => {
     await prisma.$disconnect();
   });
