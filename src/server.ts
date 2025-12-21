@@ -1,9 +1,11 @@
 import Fastify from "fastify";
+import cookie from "@fastify/cookie";
 import { prisma } from "./prisma";
 
 import { slotsRoutes } from "./routes/slots";
 import { bookingsRoutes } from "./routes/bookings";
 import { objectsRoutes } from "./routes/objects";
+import { authRoutes } from "./routes/auth";
 
 export function buildApp() {
   const app = Fastify({
@@ -11,6 +13,9 @@ export function buildApp() {
   });
 
   app.decorate("prisma", prisma);
+
+  // ✅ cookies for session auth
+  app.register(cookie);
 
   app.get("/health", async () => {
     return {
@@ -20,6 +25,8 @@ export function buildApp() {
       node: process.version
     };
   });
+
+  app.register(authRoutes, { prefix: "/auth" });
 
   app.register(objectsRoutes, { prefix: "/objects" });
   app.register(slotsRoutes, { prefix: "/slots" });

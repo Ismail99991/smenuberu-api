@@ -14,9 +14,35 @@ model User {
 
   displayName String?
 
+  // ✅ Yandex OAuth identity
+  yandexId    String? @unique
+  yandexLogin String?
+  avatarUrl   String?
+  email       String?
+
+  // auth sessions
+  sessions Session[]
+
   bookings         Booking[]
   reputationEvents ReputationEvent[]
   feedbacks        Feedback[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  // хранить только хэш токена (не сырой токен)
+  tokenHash String @unique
+
+  // когда сессия истекает
+  expiresAt DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Object {
