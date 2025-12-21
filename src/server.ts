@@ -12,7 +12,12 @@ export function buildApp() {
   app.decorate("prisma", prisma);
 
   app.get("/health", async () => {
-    return { ok: true };
+    return {
+      ok: true,
+      commit: process.env.RENDER_GIT_COMMIT ?? null,
+      serviceId: process.env.RENDER_SERVICE_ID ?? null,
+      node: process.version
+    };
   });
 
   app.register(slotsRoutes, { prefix: "/slots" });
