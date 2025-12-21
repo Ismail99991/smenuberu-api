@@ -8,14 +8,21 @@ const fastify_1 = __importDefault(require("fastify"));
 const prisma_1 = require("./prisma");
 const slots_1 = require("./routes/slots");
 const bookings_1 = require("./routes/bookings");
+const objects_1 = require("./routes/objects");
 function buildApp() {
     const app = (0, fastify_1.default)({
         logger: true
     });
     app.decorate("prisma", prisma_1.prisma);
     app.get("/health", async () => {
-        return { ok: true };
+        return {
+            ok: true,
+            commit: process.env.RENDER_GIT_COMMIT ?? null,
+            serviceId: process.env.RENDER_SERVICE_ID ?? null,
+            node: process.version
+        };
     });
+    app.register(objects_1.objectsRoutes, { prefix: "/objects" });
     app.register(slots_1.slotsRoutes, { prefix: "/slots" });
     app.register(bookings_1.bookingsRoutes, { prefix: "/bookings" });
     app.addHook("onClose", async () => {

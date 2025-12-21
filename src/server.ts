@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 
 import { slotsRoutes } from "./routes/slots";
 import { bookingsRoutes } from "./routes/bookings";
+import { objectsRoutes } from "./routes/objects";
 
 export function buildApp() {
   const app = Fastify({
@@ -20,6 +21,7 @@ export function buildApp() {
     };
   });
 
+  app.register(objectsRoutes, { prefix: "/objects" });
   app.register(slotsRoutes, { prefix: "/slots" });
   app.register(bookingsRoutes, { prefix: "/bookings" });
 
