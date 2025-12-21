@@ -93,3 +93,4 @@ const bookingsRoutes = async (app) => {
     });
 };
 exports.bookingsRoutes = bookingsRoutes;
+//# sourceMappingURL=bookings.js.map
