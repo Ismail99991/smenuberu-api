@@ -1,3 +1,6 @@
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
+
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import { prisma } from "./prisma";
@@ -14,7 +17,6 @@ export function buildApp() {
 
   app.decorate("prisma", prisma);
 
-  // ✅ cookies for session auth
   app.register(cookie);
 
   app.get("/health", async () => {
@@ -31,11 +33,6 @@ export function buildApp() {
   app.register(objectsRoutes, { prefix: "/objects" });
   app.register(slotsRoutes, { prefix: "/slots" });
   app.register(bookingsRoutes, { prefix: "/bookings" });
-
-  app.ready(() => {
-  app.log.info(app.printRoutes());
-});
-
 
   app.addHook("onClose", async () => {
     await prisma.$disconnect();
