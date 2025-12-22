@@ -204,7 +204,7 @@ export async function authRoutes(app: FastifyInstance) {
         sameSite: "none",
         secure: true,
         path: "/",
-        expiresAT
+        expires: expiresAt
       });
 
       return reply.redirect(`${webUrlFromEnv()}/me`);
