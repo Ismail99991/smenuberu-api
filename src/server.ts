@@ -3,6 +3,7 @@ dns.setDefaultResultOrder("ipv4first");
 
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
+import cors from "@fastify/cors";
 import { prisma } from "./prisma";
 
 import { slotsRoutes } from "./routes/slots";
@@ -18,6 +19,24 @@ export function buildApp() {
   app.decorate("prisma", prisma);
 
   app.register(cookie);
+
+  // ✅ CORS для smenube.ru + куки
+  app.register(cors, {
+    origin: (origin, cb) => {
+      const allowlist = [
+        "https://smenube.ru",
+        "http://localhost:3000"
+      ];
+
+      // запросы без Origin (curl/postman/server-to-server) — разрешаем
+      if (!origin) return cb(null, true);
+
+      if (allowlist.includes(origin)) return cb(null, true);
+
+      return cb(new Error("Not allowed by CORS"), false);
+    },
+    credentials: true
+  });
 
   app.get("/health", async () => {
     return {
