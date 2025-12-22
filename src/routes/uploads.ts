@@ -54,11 +54,6 @@ function getS3() {
   const accessKeyId = requireEnv("YOS_ACCESS_KEY_ID");
   const secretAccessKey = requireEnv("YOS_SECRET_ACCESS_KEY");
 
-  console.log('[DEBUG getS3] Endpoint:', endpoint);
-  console.log('[DEBUG getS3] Region:', region);
-  console.log('[DEBUG getS3] AccessKeyId length:', accessKeyId?.length || 0);
-  console.log('[DEBUG getS3] SecretKey length:', secretAccessKey?.length || 0);
-
   return new S3Client({
     region,
     endpoint,
@@ -68,9 +63,7 @@ function getS3() {
 }
 
 function getBucket() {
-  const bucket = process.env.YOS_BUCKET?.trim() || "smenuberu";
-  console.log('[DEBUG getBucket] Bucket:', bucket);
-  return bucket;
+  return process.env.YOS_BUCKET?.trim() || "smenuberu";
 }
 
 function getPublicBase(bucket: string) {
@@ -100,17 +93,11 @@ export async function uploadsRoutes(app: FastifyInstance) {
    * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-photo", async (req, reply) => {
-    console.log('\n=== DEBUG UPLOAD START ===');
-    console.log('[DEBUG] 1. Request received for /object-photo');
-
     const userId = await getUserIdFromSession(app, req);
-    console.log('[DEBUG] 2. UserId from session:', userId);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
     const parsed = uploadSchema.safeParse(req.body);
-    console.log('[DEBUG] 3. Parsed body:', JSON.stringify(parsed.data));
     if (!parsed.success) {
-      console.log('[DEBUG] 3a. Parse error:', parsed.error.issues);
       return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
     }
 
@@ -123,7 +110,6 @@ export async function uploadsRoutes(app: FastifyInstance) {
         select: { id: true },
       });
 
-      console.log('[DEBUG] 4. Object found:', !!object);
       if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
       const bucket = getBucket();
@@ -134,33 +120,29 @@ export async function uploadsRoutes(app: FastifyInstance) {
       const id = crypto.randomUUID();
 
       const key = `objects/${parsed.data.objectId}/photos/${id}.${ext}`;
-      console.log('[DEBUG] 5. Key:', key);
-      console.log('[DEBUG] 6. ContentType:', ct);
 
+      // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ №1: Отключаем checksum заголовки
       const cmd = new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         ContentType: ct,
         ChecksumAlgorithm: undefined,
+        // Этот параметр предотвращает добавление x-amz-checksum-* заголовков
+        // @ts-ignore - параметр существует в рантайме, но не в типах
+        disableChecksum: true,
       });
-      console.log('[DEBUG] 7. Cmd created. ChecksumAlgorithm:', cmd.input.ChecksumAlgorithm);
 
-      console.log('[DEBUG] 8. Generating signed URL...');
+      // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ №2: Явно указываем заголовки для подписи
       const uploadUrl = await getSignedUrl(s3, cmd, {
         expiresIn: 120,
         signableHeaders: new Set(['host', 'content-type'])
       });
-      console.log('[DEBUG] 9. Generated URL (first 200 chars):', uploadUrl.substring(0, 200));
 
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
-      console.log('[DEBUG] 10. Public URL:', publicUrl);
-      console.log('[DEBUG] 11. Full presigned URL:', uploadUrl);
-      console.log('=== DEBUG UPLOAD END ===\n');
 
       return reply.send({ ok: true, uploadUrl, publicUrl, key });
     } catch (err: any) {
-      console.error('[DEBUG ERROR] Upload failed:', err);
       app.log.error({ err }, "uploads/object-photo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
     }
@@ -172,7 +154,6 @@ export async function uploadsRoutes(app: FastifyInstance) {
    * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-logo", async (req, reply) => {
-    console.log('\n=== DEBUG LOGO UPLOAD START ===');
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
@@ -201,11 +182,14 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       const key = `objects/${parsed.data.objectId}/logo/${id}.${ext}`;
 
+      // ТАКОЕ ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПА
       const cmd = new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         ContentType: ct,
         ChecksumAlgorithm: undefined,
+        // @ts-ignore
+        disableChecksum: true,
       });
 
       const uploadUrl = await getSignedUrl(s3, cmd, {
@@ -216,10 +200,8 @@ export async function uploadsRoutes(app: FastifyInstance) {
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
 
-      console.log('=== DEBUG LOGO UPLOAD END ===');
       return reply.send({ ok: true, uploadUrl, publicUrl, key });
     } catch (err: any) {
-      console.error('[DEBUG ERROR] Logo upload failed:', err);
       app.log.error({ err }, "uploads/object-logo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
     }
