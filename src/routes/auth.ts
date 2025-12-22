@@ -93,6 +93,9 @@ function avatarUrlFromYandex(default_avatar_id?: string): string | null {
 }
 
 export async function authRoutes(app: FastifyInstance) {
+  /**
+   * GET /auth/yandex/start
+   */
   app.get("/yandex/start", async (_req, reply) => {
     const clientId = process.env.YANDEX_CLIENT_ID ?? "";
     const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
@@ -109,7 +112,7 @@ export async function authRoutes(app: FastifyInstance) {
     // state живёт 10 минут
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    // сохраняем в БД (cookie не используем)
+    // ✅ сохраняем в БД (основной источник правды)
     await prisma.oAuthState.create({
       data: {
         provider: "yandex",
@@ -118,12 +121,25 @@ export async function authRoutes(app: FastifyInstance) {
       }
     });
 
+    // ✅ + дублируем в cookie как fallback (если БД/окружение внезапно не совпадёт)
+    reply.setCookie("yandex_oauth_state", state, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: true,
+      path: "/",
+      maxAge: 10 * 60
+    });
+
     const url = yandexAuthorizeUrl({ clientId, redirectUri, state });
     return reply.redirect(url);
   });
 
+  /**
+   * GET /auth/yandex/callback
+   */
   app.get("/yandex/callback", async (req, reply) => {
     let stage = "init";
+
     try {
       const clientId = process.env.YANDEX_CLIENT_ID ?? "";
       const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
@@ -142,20 +158,30 @@ export async function authRoutes(app: FastifyInstance) {
       stage = "state_check_db";
       const row = await prisma.oAuthState.findUnique({
         where: { state },
-        select: { id: true, expiresAt: true, provider: true }
+        select: { expiresAt: true, provider: true }
       });
 
+      const cookieState = (req.cookies as any)?.yandex_oauth_state ?? "";
+
+      // ✅ 1) основной путь — через БД
+      // ✅ 2) fallback — через cookie (если БД не совпала/не записалась/и т.п.)
       if (!row || row.provider !== "yandex") {
-        return reply.code(400).send({ ok: false, error: "invalid state" });
+        if (!cookieState || cookieState !== state) {
+          return reply.code(400).send({ ok: false, error: "invalid state" });
+        }
+      } else {
+        if (row.expiresAt.getTime() <= Date.now()) {
+          await prisma.oAuthState.delete({ where: { state } }).catch(() => {});
+          reply.clearCookie("yandex_oauth_state", { path: "/" });
+          return reply.code(400).send({ ok: false, error: "state expired" });
+        }
+
+        // одноразовый state
+        await prisma.oAuthState.delete({ where: { state } });
       }
 
-      if (row.expiresAt.getTime() <= Date.now()) {
-        await prisma.oAuthState.delete({ where: { state } }).catch(() => {});
-        return reply.code(400).send({ ok: false, error: "state expired" });
-      }
-
-      // одноразовый: удаляем сразу
-      await prisma.oAuthState.delete({ where: { state } });
+      // чистим state-cookie (если был)
+      reply.clearCookie("yandex_oauth_state", { path: "/" });
 
       const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
 
@@ -219,6 +245,9 @@ export async function authRoutes(app: FastifyInstance) {
     }
   });
 
+  /**
+   * GET /auth/me
+   */
   app.get("/me", async (req, reply) => {
     const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
     if (!sessionToken) return reply.code(200).send({ ok: true, user: null });
@@ -257,6 +286,9 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({ ok: true, user: session.user });
   });
 
+  /**
+   * POST /auth/logout
+   */
   app.post("/logout", async (req, reply) => {
     const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
     if (!sessionToken) {
