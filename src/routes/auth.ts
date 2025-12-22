@@ -6,13 +6,19 @@ function normalizeBaseUrl(u: string) {
 }
 
 function baseUrlFromEnv() {
-  // ✅ важно: по умолчанию уже ваш прод API домен
   return normalizeBaseUrl(process.env.API_BASE_URL ?? "https://api.smenube.ru");
 }
 
-function webUrlFromEnv() {
-  // ✅ важно: по умолчанию ваш прод client домен
-  return normalizeBaseUrl(process.env.WEB_URL ?? "https://client.smenube.ru");
+function webUrlFromEnvDefault() {
+  return normalizeBaseUrl(process.env.WEB_URL ?? "https://www.smenube.ru");
+}
+
+function clientWebUrlFromEnv() {
+  return normalizeBaseUrl(process.env.CLIENT_WEB_URL ?? "https://client.smenube.ru");
+}
+
+function webWebUrlFromEnv() {
+  return normalizeBaseUrl(process.env.WEB_WEB_URL ?? webUrlFromEnvDefault());
 }
 
 function cookieName() {
@@ -80,9 +86,7 @@ async function fetchYandexUserInfo(accessToken: string): Promise<{
 
   const res = await fetch(u.toString(), {
     method: "GET",
-    headers: {
-      Authorization: `OAuth ${accessToken}`
-    }
+    headers: { Authorization: `OAuth ${accessToken}` }
   });
 
   if (!res.ok) {
@@ -104,31 +108,76 @@ function avatarUrlFromYandex(default_avatar_id?: string): string | null {
  */
 function cookieDomainForReq(req: any): string | undefined {
   const host = String(req?.headers?.host ?? "");
-
-  // localhost / 127.0.0.1 / локальные порты
   if (host.includes("localhost") || host.includes("127.0.0.1")) return undefined;
-
-  // если API живёт на smenube.ru поддоменах — шарим куку на весь eTLD+1
-  // api.smenube.ru / client.smenube.ru / www.smenube.ru
   return ".smenube.ru";
 }
 
+function readNext(req: any, fallback: string) {
+  const n = typeof (req.query as any)?.next === "string" ? String((req.query as any).next) : "";
+  const safe = n.startsWith("/") ? n : fallback;
+  return safe;
+}
+
+function setNextCookie(reply: any, next: string) {
+  reply.setCookie("yandex_oauth_next", next, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    path: "/",
+    maxAge: 10 * 60
+  });
+}
+
+function takeNextCookie(req: any, reply: any, fallback: string) {
+  const next = (req.cookies as any)?.yandex_oauth_next ?? fallback;
+  reply.clearCookie("yandex_oauth_next", { path: "/" });
+  return typeof next === "string" && next.startsWith("/") ? next : fallback;
+}
+
+type FlowKind = "client" | "web" | "legacy";
+
+function flowConfig(kind: FlowKind) {
+  // Разные приложения/доступы:
+  // - YANDEX_CLIENT_ID_CLIENT / _SECRET_CLIENT
+  // - YANDEX_CLIENT_ID_WEB / _SECRET_WEB
+  if (kind === "client") {
+    const clientId = process.env.YANDEX_CLIENT_ID_CLIENT ?? "";
+    const clientSecret = process.env.YANDEX_CLIENT_SECRET_CLIENT ?? "";
+    const redirectUri = `${baseUrlFromEnv()}/auth/yandex/client/callback`;
+    const webUrl = clientWebUrlFromEnv();
+    const provider = "yandex_client";
+    return { clientId, clientSecret, redirectUri, webUrl, provider };
+  }
+
+  if (kind === "web") {
+    const clientId = process.env.YANDEX_CLIENT_ID_WEB ?? "";
+    const clientSecret = process.env.YANDEX_CLIENT_SECRET_WEB ?? "";
+    const redirectUri = `${baseUrlFromEnv()}/auth/yandex/web/callback`;
+    const webUrl = webWebUrlFromEnv();
+    const provider = "yandex_web";
+    return { clientId, clientSecret, redirectUri, webUrl, provider };
+  }
+
+  // legacy/back-compat
+  const clientId = process.env.YANDEX_CLIENT_ID ?? "";
+  const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
+  const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
+  const webUrl = webUrlFromEnvDefault();
+  const provider = "yandex";
+  return { clientId, clientSecret, redirectUri, webUrl, provider };
+}
+
 export async function authRoutes(app: FastifyInstance) {
-  /**
-   * GET /auth/yandex/start
-   */
-  app.get("/yandex/start", async (_req, reply) => {
-    const clientId = process.env.YANDEX_CLIENT_ID ?? "";
-    const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
-    if (!clientId || !clientSecret) {
-      return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set" });
+  async function startFlow(kind: FlowKind, req: any, reply: any) {
+    const cfg = flowConfig(kind);
+    if (!cfg.clientId || !cfg.clientSecret) {
+      return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set for flow", flow: kind });
     }
 
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 
     const state = randomState();
-    const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
 
     // state живёт 10 минут
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -136,13 +185,13 @@ export async function authRoutes(app: FastifyInstance) {
     // ✅ сохраняем в БД (основной источник правды)
     await prisma.oAuthState.create({
       data: {
-        provider: "yandex",
+        provider: cfg.provider,
         state,
         expiresAt
       }
     });
 
-    // ✅ + дублируем в cookie как fallback
+    // ✅ state cookie fallback
     reply.setCookie("yandex_oauth_state", state, {
       httpOnly: true,
       sameSite: "lax",
@@ -151,26 +200,26 @@ export async function authRoutes(app: FastifyInstance) {
       maxAge: 10 * 60
     });
 
-    const url = yandexAuthorizeUrl({ clientId, redirectUri, state });
+    // ✅ next cookie (куда вернуться после callback)
+    // дефолт для flow:
+    const fallbackNext = kind === "client" ? "/profile" : "/me";
+    const next = readNext(req, fallbackNext);
+    setNextCookie(reply, next);
+
+    const url = yandexAuthorizeUrl({ clientId: cfg.clientId, redirectUri: cfg.redirectUri, state });
     return reply.redirect(url);
-  });
+  }
 
-  /**
-   * GET /auth/yandex/callback
-   */
-  app.get("/yandex/callback", async (req, reply) => {
+  async function callbackFlow(kind: FlowKind, req: any, reply: any) {
     let stage = "init";
-
     try {
-      const clientId = process.env.YANDEX_CLIENT_ID ?? "";
-      const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
-      if (!clientId || !clientSecret) {
-        return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set" });
+      const cfg = flowConfig(kind);
+      if (!cfg.clientId || !cfg.clientSecret) {
+        return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set for flow", flow: kind });
       }
 
       const code = typeof (req.query as any)?.code === "string" ? String((req.query as any).code) : "";
       const state = typeof (req.query as any)?.state === "string" ? String((req.query as any).state) : "";
-
       if (!code || !state) return reply.code(400).send({ ok: false, error: "missing code/state" });
 
       // @ts-expect-error prisma is decorated in server.ts
@@ -184,9 +233,9 @@ export async function authRoutes(app: FastifyInstance) {
 
       const cookieState = (req.cookies as any)?.yandex_oauth_state ?? "";
 
-      // ✅ 1) основной путь — через БД
+      // ✅ 1) основной путь — через БД (provider совпадает)
       // ✅ 2) fallback — через cookie
-      if (!row || row.provider !== "yandex") {
+      if (!row || row.provider !== cfg.provider) {
         if (!cookieState || cookieState !== state) {
           return reply.code(400).send({ ok: false, error: "invalid state" });
         }
@@ -196,18 +245,19 @@ export async function authRoutes(app: FastifyInstance) {
           reply.clearCookie("yandex_oauth_state", { path: "/" });
           return reply.code(400).send({ ok: false, error: "state expired" });
         }
-
         // одноразовый state
         await prisma.oAuthState.delete({ where: { state } });
       }
 
-      // чистим state-cookie (если был)
       reply.clearCookie("yandex_oauth_state", { path: "/" });
 
-      const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
-
       stage = "token_exchange_fetch";
-      const token = await exchangeCodeForToken({ code, clientId, clientSecret, redirectUri });
+      const token = await exchangeCodeForToken({
+        code,
+        clientId: cfg.clientId,
+        clientSecret: cfg.clientSecret,
+        redirectUri: cfg.redirectUri
+      });
 
       stage = "userinfo_fetch";
       const info = await fetchYandexUserInfo(token.access_token);
@@ -246,10 +296,8 @@ export async function authRoutes(app: FastifyInstance) {
       });
 
       stage = "set_cookie_and_redirect";
-
       const domain = cookieDomainForReq(req);
 
-      // ✅ кука общая для поддоменов smenube.ru
       reply.setCookie(cookieName(), rawSessionToken, {
         httpOnly: true,
         secure: true,
@@ -259,18 +307,55 @@ export async function authRoutes(app: FastifyInstance) {
         ...(domain ? { domain } : {})
       });
 
-      // ✅ редирект на client (а не localhost)
-      return reply.redirect(`${webUrlFromEnv()}/me`);
+      const fallbackNext = kind === "client" ? "/profile" : "/me";
+      const next = takeNextCookie(req, reply, fallbackNext);
+
+      return reply.redirect(`${cfg.webUrl}${next}`);
     } catch (err: any) {
-      app.log.error({ err, stage }, "auth yandex callback failed");
+      app.log.error({ err, stage, flow: kind }, "auth yandex callback failed");
       return reply.code(500).send({
         ok: false,
         error: "auth callback failed",
         stage,
+        flow: kind,
         message: err?.message ?? String(err)
       });
     }
-  });
+  }
+
+  // ========= New flows (separate apps) =========
+
+  /**
+   * GET /auth/yandex/client/start
+   */
+  app.get("/yandex/client/start", async (req, reply) => startFlow("client", req, reply));
+
+  /**
+   * GET /auth/yandex/client/callback
+   */
+  app.get("/yandex/client/callback", async (req, reply) => callbackFlow("client", req, reply));
+
+  /**
+   * GET /auth/yandex/web/start
+   */
+  app.get("/yandex/web/start", async (req, reply) => startFlow("web", req, reply));
+
+  /**
+   * GET /auth/yandex/web/callback
+   */
+  app.get("/yandex/web/callback", async (req, reply) => callbackFlow("web", req, reply));
+
+  // ========= Legacy (keep old behavior) =========
+
+  /**
+   * GET /auth/yandex/start  (legacy)
+   */
+  app.get("/yandex/start", async (req, reply) => startFlow("legacy", req, reply));
+
+  /**
+   * GET /auth/yandex/callback (legacy)
+   */
+  app.get("/yandex/callback", async (req, reply) => callbackFlow("legacy", req, reply));
 
   /**
    * GET /auth/me
@@ -318,7 +403,6 @@ export async function authRoutes(app: FastifyInstance) {
    */
   app.post("/logout", async (req, reply) => {
     const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
-
     const domain = cookieDomainForReq(req);
 
     if (!sessionToken) {
