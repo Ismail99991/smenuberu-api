@@ -5,7 +5,7 @@ import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import { prisma } from "./prisma";
-
+import { bookingsMeRoutes } from "./routes/bookings-me";
 import { slotsRoutes } from "./routes/slots";
 import { bookingsRoutes } from "./routes/bookings";
 import { objectsRoutes } from "./routes/objects";
@@ -53,6 +53,7 @@ export function buildApp() {
   app.register(objectsRoutes, { prefix: "/objects" });
   app.register(slotsRoutes, { prefix: "/slots" });
   app.register(bookingsRoutes, { prefix: "/bookings" });
+  app.register(bookingsMeRoutes, { prefix: "/bookings" });
 
   app.addHook("onClose", async () => {
     await prisma.$disconnect();
