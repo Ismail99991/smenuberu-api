@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import crypto from "crypto";
 import { z } from "zod";
-
+import crypto from "crypto";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -14,7 +13,7 @@ function sha256Hex(s: string) {
 }
 
 /**
- * Достаём userId из текущей cookie-сессии (как в /auth/me)
+ * Достаём userId из cookie-сессии (как в /bookings/me).
  */
 async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
   const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
@@ -42,142 +41,161 @@ async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<str
   return session.userId;
 }
 
-function mustEnv(name: string) {
+function requireEnv(name: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
+  if (!v || !String(v).trim()) throw new Error(`Missing env: ${name}`);
+  return String(v).trim();
 }
 
-function sanitizeExtFromContentType(contentType: string) {
-  const ct = contentType.toLowerCase();
-  if (ct.includes("jpeg") || ct.includes("jpg")) return "jpg";
-  if (ct.includes("png")) return "png";
-  if (ct.includes("webp")) return "webp";
-  return "bin";
-}
-
-function makeS3() {
-  const endpoint = process.env.YC_S3_ENDPOINT ?? "https://storage.yandexcloud.net";
+function getS3() {
+  // Yandex Object Storage (S3-compatible)
+  const endpoint = process.env.YOS_ENDPOINT?.trim() || "https://storage.yandexcloud.net";
+  const region = process.env.YOS_REGION?.trim() || "ru-central1";
+  const accessKeyId = requireEnv("YOS_ACCESS_KEY_ID");
+  const secretAccessKey = requireEnv("YOS_SECRET_ACCESS_KEY");
 
   return new S3Client({
-    region: process.env.YC_S3_REGION ?? "ru-central1",
+    region,
     endpoint,
-    credentials: {
-      accessKeyId: mustEnv("YC_S3_ACCESS_KEY_ID"),
-      secretAccessKey: mustEnv("YC_S3_SECRET_ACCESS_KEY"),
-    },
+    credentials: { accessKeyId, secretAccessKey },
+    forcePathStyle: false,
   });
 }
 
-function buildPublicUrl(publicBase: string, bucket: string, key: string) {
-  return `${publicBase.replace(/\/+$/, "")}/${bucket}/${key}`
-    .replace(/\/{2,}/g, "/")
-    .replace(":/", "://");
+function getBucket() {
+  return process.env.YOS_BUCKET?.trim() || "smenuberu";
 }
 
-/**
- * ✅ Экспорт: uploadsRoutes
- */
+function getPublicBase(bucket: string) {
+  // Можно переопределить, если используешь CDN/другой домен:
+  // например https://cdn.smenube.ru
+  const fromEnv = process.env.YOS_PUBLIC_BASE?.trim();
+  if (fromEnv) return fromEnv.replace(/\/+$/, "");
+  // стандартный публичный URL бакета (виртуальный хост)
+  return `https://${bucket}.storage.yandexcloud.net`;
+}
+
+function extFromContentType(ct: string) {
+  const c = ct.toLowerCase();
+  if (c.includes("png")) return "png";
+  if (c.includes("jpeg") || c.includes("jpg")) return "jpg";
+  if (c.includes("webp")) return "webp";
+  if (c.includes("gif")) return "gif";
+  return "bin";
+}
+
+const uploadSchema = z.object({
+  objectId: z.string().min(1),
+  contentType: z.string().min(1),
+});
+
 export async function uploadsRoutes(app: FastifyInstance) {
   /**
    * POST /uploads/object-photo
-   * Body: { objectId, contentType }
-   * -> { ok: true, uploadUrl, publicUrl }
+   * body: { objectId, contentType }
+   * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-photo", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
-    const body = z
-      .object({
-        objectId: z.string().min(1),
-        contentType: z.string().min(1),
-      })
-      .parse(req.body);
-
-    // @ts-expect-error prisma is decorated in server.ts
-    const prisma = app.prisma;
-
-    const obj = await prisma.object.findUnique({
-      where: { id: body.objectId },
-      select: { id: true },
-    });
-    if (!obj) return reply.code(404).send({ ok: false, error: "Object not found" });
-
-    // max 3 фото (как в objectsRoutes)
-    const photosCount = await prisma.objectPhoto.count({
-      where: { objectId: body.objectId },
-    });
-    if (photosCount >= 3) {
-      return reply.code(409).send({ ok: false, error: "Photos limit reached (max 3)" });
+    const parsed = uploadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
     }
 
-    const bucket = mustEnv("YC_S3_BUCKET"); // smenuberu
-    const publicBase = mustEnv("YC_S3_PUBLIC_BASE_URL"); // например https://storage.yandexcloud.net
+    try {
+      // @ts-expect-error prisma is decorated in server.ts
+      const prisma = app.prisma;
 
-    const ext = sanitizeExtFromContentType(body.contentType);
-    const key = `objects/${body.objectId}/photos/${crypto.randomUUID()}.${ext}`;
+      const object = await prisma.object.findUnique({
+        where: { id: parsed.data.objectId },
+        select: { id: true },
+      });
 
-    const s3 = makeS3();
+      if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
-    const cmd = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: body.contentType,
-    });
+      const bucket = getBucket();
+      const s3 = getS3();
 
-    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 60 });
-    const publicUrl = buildPublicUrl(publicBase, bucket, key);
+      const ct = parsed.data.contentType.trim();
+      const ext = extFromContentType(ct);
+      const id = crypto.randomUUID();
 
-    return reply.send({ ok: true, uploadUrl, publicUrl });
+      // ключ в бакете
+      const key = `objects/${parsed.data.objectId}/photos/${id}.${ext}`;
+
+      const cmd = new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ContentType: ct,
+        // Бакет у тебя публичный — но на всякий случай делаем объект public-read
+        ACL: "public-read",
+      });
+
+      // пресайн на 2 минуты
+      const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 120 });
+
+      const publicBase = getPublicBase(bucket);
+      const publicUrl = `${publicBase}/${key}`;
+
+      return reply.send({ ok: true, uploadUrl, publicUrl, key });
+    } catch (err: any) {
+      app.log.error({ err }, "uploads/object-photo failed");
+      return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
+    }
   });
 
   /**
-   * ✅ NEW: POST /uploads/object-logo
-   * Body: { objectId, contentType }
-   * -> { ok: true, uploadUrl, publicUrl }
-   *
-   * Логотип НЕ считается в лимит photos=3.
+   * POST /uploads/object-logo
+   * body: { objectId, contentType }
+   * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-logo", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
-    const body = z
-      .object({
-        objectId: z.string().min(1),
-        contentType: z.string().min(1),
-      })
-      .parse(req.body);
+    const parsed = uploadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
+    }
 
-    // @ts-expect-error prisma is decorated in server.ts
-    const prisma = app.prisma;
+    try {
+      // @ts-expect-error prisma is decorated in server.ts
+      const prisma = app.prisma;
 
-    const obj = await prisma.object.findUnique({
-      where: { id: body.objectId },
-      select: { id: true },
-    });
-    if (!obj) return reply.code(404).send({ ok: false, error: "Object not found" });
+      const object = await prisma.object.findUnique({
+        where: { id: parsed.data.objectId },
+        select: { id: true },
+      });
 
-    const bucket = mustEnv("YC_S3_BUCKET"); // smenuberu
-    const publicBase = mustEnv("YC_S3_PUBLIC_BASE_URL");
+      if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
-    const ext = sanitizeExtFromContentType(body.contentType);
+      const bucket = getBucket();
+      const s3 = getS3();
 
-    // логотип можно перезаписывать — ключ делаем стабильным
-    const key = `objects/${body.objectId}/logo/logo.${ext}`;
+      const ct = parsed.data.contentType.trim();
+      const ext = extFromContentType(ct);
+      const id = crypto.randomUUID();
 
-    const s3 = makeS3();
+      const key = `objects/${parsed.data.objectId}/logo/${id}.${ext}`;
 
-    const cmd = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: body.contentType,
-    });
+      const cmd = new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ContentType: ct,
+        ACL: "public-read",
+      });
 
-    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 60 });
-    const publicUrl = buildPublicUrl(publicBase, bucket, key);
+      const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 120 });
 
-    return reply.send({ ok: true, uploadUrl, publicUrl });
+      const publicBase = getPublicBase(bucket);
+      const publicUrl = `${publicBase}/${key}`;
+
+      return reply.send({ ok: true, uploadUrl, publicUrl, key });
+    } catch (err: any) {
+      app.log.error({ err }, "uploads/object-logo failed");
+      return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
+    }
   });
 }
