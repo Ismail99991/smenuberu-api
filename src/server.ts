@@ -25,7 +25,8 @@ export function buildApp() {
     origin: (origin, cb) => {
       const allowlist = [
         "https://smenube.ru",
-        "http://localhost:3000"
+        "http://localhost:3000",
+        "https://www.smenube.ru",
       ];
 
       // запросы без Origin (curl/postman/server-to-server) — разрешаем
