@@ -1,5 +1,7 @@
+// routes/bookings-me.ts
 import type { FastifyInstance } from "fastify";
 import crypto from "crypto";
+import { z } from "zod";
 
 function cookieName() {
   return process.env.AUTH_COOKIE_NAME ?? "smenuberu_session";
@@ -26,10 +28,7 @@ async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<str
 
   const session = await prisma.session.findUnique({
     where: { tokenHash },
-    select: {
-      expiresAt: true,
-      userId: true,
-    },
+    select: { expiresAt: true, userId: true },
   });
 
   if (!session) return null;
@@ -42,39 +41,40 @@ async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<str
   return session.userId;
 }
 
+function unauthorized(reply: any) {
+  return reply.code(401).send({ ok: false, error: "Unauthorized", bookings: [] });
+}
+
 export async function bookingsMeRoutes(app: FastifyInstance) {
   /**
-   * GET /bookings/me
-   * Возвращает брони текущего пользователя
+   * GET /bookings/me?status=booked|cancelled|...
+   * По умолчанию отдаём ТОЛЬКО активные "booked" (то есть “Забронированные”).
    */
   app.get("/me", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
-    if (!userId) return reply.code(200).send({ ok: true, bookings: [] });
+    if (!userId) return unauthorized(reply);
+
+    const { status } = z.object({ status: z.string().optional() }).parse(req.query);
 
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 
-    /**
-     * ⚠️ Важно:
-     * Я не знаю точную Prisma-модель bookings/slots у тебя в схеме,
-     * поэтому использую максимально типичный вариант:
-     * booking.userId -> slot -> object
-     *
-     * Если названия полей отличаются — скажи, и я подгоню под твою схему.
-     */
     const bookings = await prisma.booking.findMany({
-      where: { userId },
+      where: {
+        userId,
+        status: status ?? "booked",
+      },
       orderBy: { createdAt: "desc" },
       select: {
         id: true,
         status: true,
         createdAt: true,
-
         slot: {
           select: {
             id: true,
             startsAt: true,
             endsAt: true,
+            // если у вас не startsAt/endsAt, а date/startTime/endTime — просто замени селект
             object: {
               select: {
                 id: true,

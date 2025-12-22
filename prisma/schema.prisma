@@ -53,8 +53,29 @@ model Object {
   city    String
   address String?
 
+  // ✅ UI поля (web/client)
+  type    String?
+  logoUrl String?
+
+  // ✅ фото объекта (2–3), порядок через position
+  photos ObjectPhoto[]
+
   slots     Slot[]
   feedbacks Feedback[]
+}
+
+model ObjectPhoto {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  objectId String
+  object   Object @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  url      String
+  position Int
+
+  @@index([objectId])
+  @@unique([objectId, position])
 }
 
 model Slot {
