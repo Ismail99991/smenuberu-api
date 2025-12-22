@@ -54,6 +54,11 @@ function getS3() {
   const accessKeyId = requireEnv("YOS_ACCESS_KEY_ID");
   const secretAccessKey = requireEnv("YOS_SECRET_ACCESS_KEY");
 
+  console.log('[DEBUG getS3] Endpoint:', endpoint);
+  console.log('[DEBUG getS3] Region:', region);
+  console.log('[DEBUG getS3] AccessKeyId length:', accessKeyId?.length || 0);
+  console.log('[DEBUG getS3] SecretKey length:', secretAccessKey?.length || 0);
+
   return new S3Client({
     region,
     endpoint,
@@ -63,15 +68,14 @@ function getS3() {
 }
 
 function getBucket() {
-  return process.env.YOS_BUCKET?.trim() || "smenuberu";
+  const bucket = process.env.YOS_BUCKET?.trim() || "smenuberu";
+  console.log('[DEBUG getBucket] Bucket:', bucket);
+  return bucket;
 }
 
 function getPublicBase(bucket: string) {
-  // Можно переопределить, если используешь CDN/другой домен:
-  // например https://cdn.smenube.ru
   const fromEnv = process.env.YOS_PUBLIC_BASE?.trim();
   if (fromEnv) return fromEnv.replace(/\/+$/, "");
-  // стандартный публичный URL бакета (виртуальный хост)
   return `https://${bucket}.storage.yandexcloud.net`;
 }
 
@@ -96,11 +100,17 @@ export async function uploadsRoutes(app: FastifyInstance) {
    * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-photo", async (req, reply) => {
+    console.log('\n=== DEBUG UPLOAD START ===');
+    console.log('[DEBUG] 1. Request received for /object-photo');
+
     const userId = await getUserIdFromSession(app, req);
+    console.log('[DEBUG] 2. UserId from session:', userId);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
     const parsed = uploadSchema.safeParse(req.body);
+    console.log('[DEBUG] 3. Parsed body:', JSON.stringify(parsed.data));
     if (!parsed.success) {
+      console.log('[DEBUG] 3a. Parse error:', parsed.error.issues);
       return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
     }
 
@@ -113,6 +123,7 @@ export async function uploadsRoutes(app: FastifyInstance) {
         select: { id: true },
       });
 
+      console.log('[DEBUG] 4. Object found:', !!object);
       if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
       const bucket = getBucket();
@@ -122,32 +133,34 @@ export async function uploadsRoutes(app: FastifyInstance) {
       const ext = extFromContentType(ct);
       const id = crypto.randomUUID();
 
-      // ключ в бакете
       const key = `objects/${parsed.data.objectId}/photos/${id}.${ext}`;
+      console.log('[DEBUG] 5. Key:', key);
+      console.log('[DEBUG] 6. ContentType:', ct);
 
       const cmd = new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         ContentType: ct,
-        // ==== КРИТИЧНОЕ ИСПРАВЛЕНИЕ №1: Отключаем автоматическую checksum ====
-        // SDK по умолчанию добавляет x-amz-checksum-crc32, что ломает подпись
         ChecksumAlgorithm: undefined,
       });
+      console.log('[DEBUG] 7. Cmd created. ChecksumAlgorithm:', cmd.input.ChecksumAlgorithm);
 
-      // пресайн на 2 минуты
+      console.log('[DEBUG] 8. Generating signed URL...');
       const uploadUrl = await getSignedUrl(s3, cmd, {
         expiresIn: 120,
-        // ==== КРИТИЧНОЕ ИСПРАВЛЕНИЕ №2: Явно указываем подписываемые заголовки ====
-        // Если этого не сделать, подпись будет только для "host", а фронтенд
-        // отправляет ещё "Content-Type", что приводит к ошибке 403
         signableHeaders: new Set(['host', 'content-type'])
       });
+      console.log('[DEBUG] 9. Generated URL (first 200 chars):', uploadUrl.substring(0, 200));
 
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
+      console.log('[DEBUG] 10. Public URL:', publicUrl);
+      console.log('[DEBUG] 11. Full presigned URL:', uploadUrl);
+      console.log('=== DEBUG UPLOAD END ===\n');
 
       return reply.send({ ok: true, uploadUrl, publicUrl, key });
     } catch (err: any) {
+      console.error('[DEBUG ERROR] Upload failed:', err);
       app.log.error({ err }, "uploads/object-photo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
     }
@@ -159,6 +172,7 @@ export async function uploadsRoutes(app: FastifyInstance) {
    * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-logo", async (req, reply) => {
+    console.log('\n=== DEBUG LOGO UPLOAD START ===');
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
@@ -191,21 +205,21 @@ export async function uploadsRoutes(app: FastifyInstance) {
         Bucket: bucket,
         Key: key,
         ContentType: ct,
-        // ==== ТАКОЕ ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПА ====
         ChecksumAlgorithm: undefined,
       });
 
       const uploadUrl = await getSignedUrl(s3, cmd, {
         expiresIn: 120,
-        // ==== ТАКОЕ ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПА ====
         signableHeaders: new Set(['host', 'content-type'])
       });
 
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
 
+      console.log('=== DEBUG LOGO UPLOAD END ===');
       return reply.send({ ok: true, uploadUrl, publicUrl, key });
     } catch (err: any) {
+      console.error('[DEBUG ERROR] Logo upload failed:', err);
       app.log.error({ err }, "uploads/object-logo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
     }
