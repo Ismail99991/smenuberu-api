@@ -130,7 +130,6 @@ export async function uploadsRoutes(app: FastifyInstance) {
         Key: key,
         ContentType: ct,
         // Бакет у тебя публичный — но на всякий случай делаем объект public-read
-        ACL: "public-read",
       });
 
       // пресайн на 2 минуты
@@ -184,7 +183,6 @@ export async function uploadsRoutes(app: FastifyInstance) {
         Bucket: bucket,
         Key: key,
         ContentType: ct,
-        ACL: "public-read",
       });
 
       const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 120 });
