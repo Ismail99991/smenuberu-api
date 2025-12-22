@@ -92,6 +92,19 @@ function avatarUrlFromYandex(default_avatar_id?: string): string | null {
   return `https://avatars.yandex.net/get-yapic/${default_avatar_id}/islands-200`;
 }
 
+/**
+ * Для прод-куки на поддоменах нужно Domain=.smenube.ru
+ * На localhost домен ставить нельзя.
+ */
+function cookieDomainForReq(req: any): string | undefined {
+  const host = String(req?.headers?.host ?? "");
+  // localhost / 127.0.0.1 / локальные порты
+  if (host.includes("localhost") || host.includes("127.0.0.1")) return undefined;
+
+  // Если ты уже перевёл API на api.smenube.ru — это то, что нужно
+  return ".smenube.ru";
+}
+
 export async function authRoutes(app: FastifyInstance) {
   /**
    * GET /auth/yandex/start
@@ -121,7 +134,8 @@ export async function authRoutes(app: FastifyInstance) {
       }
     });
 
-    // ✅ + дублируем в cookie как fallback (если БД/окружение внезапно не совпадёт)
+    // ✅ + дублируем в cookie как fallback
+    // (для state cookie domain не обязателен, она нужна только для callback на API)
     reply.setCookie("yandex_oauth_state", state, {
       httpOnly: true,
       sameSite: "lax",
@@ -164,7 +178,7 @@ export async function authRoutes(app: FastifyInstance) {
       const cookieState = (req.cookies as any)?.yandex_oauth_state ?? "";
 
       // ✅ 1) основной путь — через БД
-      // ✅ 2) fallback — через cookie (если БД не совпала/не записалась/и т.п.)
+      // ✅ 2) fallback — через cookie
       if (!row || row.provider !== "yandex") {
         if (!cookieState || cookieState !== state) {
           return reply.code(400).send({ ok: false, error: "invalid state" });
@@ -225,12 +239,19 @@ export async function authRoutes(app: FastifyInstance) {
       });
 
       stage = "set_cookie_and_redirect";
+
+      const domain = cookieDomainForReq(req);
+
+      // ✅ ВАЖНО ДЛЯ iOS/Safari:
+      // - при api.smenube.ru + www.smenube.ru это same-site, поэтому SameSite=Lax
+      // - Domain=.smenube.ru чтобы кука была общая для поддоменов
       reply.setCookie(cookieName(), rawSessionToken, {
         httpOnly: true,
-        sameSite: "none",
         secure: true,
+        sameSite: "lax",
         path: "/",
-        expires: expiresAt
+        expires: expiresAt,
+        ...(domain ? { domain } : {})
       });
 
       return reply.redirect(`${webUrlFromEnv()}/me`);
@@ -291,8 +312,16 @@ export async function authRoutes(app: FastifyInstance) {
    */
   app.post("/logout", async (req, reply) => {
     const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
+
+    const domain = cookieDomainForReq(req);
+
     if (!sessionToken) {
-      reply.clearCookie(cookieName(), { path: "/" });
+      reply.clearCookie(cookieName(), {
+        path: "/",
+        secure: true,
+        sameSite: "lax",
+        ...(domain ? { domain } : {})
+      });
       return reply.send({ ok: true });
     }
 
@@ -302,7 +331,12 @@ export async function authRoutes(app: FastifyInstance) {
     const prisma = app.prisma;
 
     await prisma.session.deleteMany({ where: { tokenHash } }).catch(() => {});
-    reply.clearCookie(cookieName(), { path: "/" });
+    reply.clearCookie(cookieName(), {
+      path: "/",
+      secure: true,
+      sameSite: "lax",
+      ...(domain ? { domain } : {})
+    });
     return reply.send({ ok: true });
   });
 }
