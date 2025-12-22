@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import crypto from "crypto";
 
 const urlOrEmpty = z
   .string()
@@ -42,6 +43,41 @@ function normalizeOptString(x: unknown): string | null | undefined {
     return t.length ? t : null;
   }
   return undefined;
+}
+
+// ✅ auth utils (как в /auth/me)
+function cookieName() {
+  return process.env.AUTH_COOKIE_NAME ?? "smenuberu_session";
+}
+
+function sha256Hex(s: string) {
+  return crypto.createHash("sha256").update(s).digest("hex");
+}
+
+async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
+  const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
+  if (!sessionToken) return null;
+
+  const tokenHash = sha256Hex(String(sessionToken));
+
+  // @ts-expect-error prisma is decorated in server.ts
+  const prisma = app.prisma;
+
+  const now = new Date();
+
+  const session = await prisma.session.findUnique({
+    where: { tokenHash },
+    select: { expiresAt: true, userId: true },
+  });
+
+  if (!session) return null;
+
+  if (session.expiresAt.getTime() <= now.getTime()) {
+    await prisma.session.delete({ where: { tokenHash } }).catch(() => {});
+    return null;
+  }
+
+  return session.userId;
 }
 
 export async function objectsRoutes(app: FastifyInstance) {
@@ -115,6 +151,10 @@ export async function objectsRoutes(app: FastifyInstance) {
    * POST /objects
    */
   app.post("/", async (req, reply) => {
+    // ✅ require auth for create
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 
@@ -176,6 +216,10 @@ export async function objectsRoutes(app: FastifyInstance) {
    * PATCH /objects/:id
    */
   app.patch("/:id", async (req, reply) => {
+    // ✅ require auth for update
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 
@@ -298,6 +342,10 @@ export async function objectsRoutes(app: FastifyInstance) {
    * Безопасно: если есть связанные записи — 409
    */
   app.delete("/:id", async (req, reply) => {
+    // ✅ require auth for delete
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 

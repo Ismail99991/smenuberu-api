@@ -10,6 +10,7 @@ import { slotsRoutes } from "./routes/slots";
 import { bookingsRoutes } from "./routes/bookings";
 import { objectsRoutes } from "./routes/objects";
 import { authRoutes } from "./routes/auth";
+import { uploadsRoutes } from "./routes/uploads";
 
 export function buildApp() {
   const app = Fastify({
@@ -20,7 +21,7 @@ export function buildApp() {
 
   app.register(cookie);
 
-  // ✅ CORS для smenube.ru + куки
+  // ✅ CORS для smenube.ru + куки (+ Vercel preview/prod домены)
   app.register(cors, {
     origin: (origin, cb) => {
       const allowlist = [
@@ -31,6 +32,9 @@ export function buildApp() {
 
       // запросы без Origin (curl/postman/server-to-server) — разрешаем
       if (!origin) return cb(null, true);
+
+      // ✅ Разрешаем деплои Vercel (preview/prod на *.vercel.app)
+      if (origin.endsWith(".vercel.app")) return cb(null, true);
 
       if (allowlist.includes(origin)) return cb(null, true);
 
@@ -54,6 +58,9 @@ export function buildApp() {
   app.register(slotsRoutes, { prefix: "/slots" });
   app.register(bookingsRoutes, { prefix: "/bookings" });
   app.register(bookingsMeRoutes, { prefix: "/bookings" });
+
+  // ✅ uploads (presigned URLs)
+  app.register(uploadsRoutes, { prefix: "/uploads" });
 
   app.addHook("onClose", async () => {
     await prisma.$disconnect();
