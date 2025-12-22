@@ -13,7 +13,7 @@ function sha256Hex(s: string) {
 }
 
 /**
- * Достаём userId из cookie-сессии (как в /bookings/me).
+ * Достаём userId из cookie-сессии.
  */
 async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
   const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
@@ -48,9 +48,9 @@ function requireEnv(name: string): string {
 }
 
 function getS3() {
-  // Yandex Object Storage (S3-compatible)
-  const endpoint = process.env.YOS_ENDPOINT?.trim() || "https://storage.yandexcloud.net";
-  const region = process.env.YOS_REGION?.trim() || "ru-central1";
+  // Cloud.ru Evolution Object Storage (S3-compatible)
+  const endpoint = process.env.YOS_ENDPOINT?.trim() || "https://s3.cloud.ru";
+  const region = process.env.YOS_REGION?.trim() || "ru-central-1";
   const accessKeyId = requireEnv("YOS_ACCESS_KEY_ID");
   const secretAccessKey = requireEnv("YOS_SECRET_ACCESS_KEY");
 
@@ -59,17 +59,19 @@ function getS3() {
     endpoint,
     credentials: { accessKeyId, secretAccessKey },
     forcePathStyle: false,
+    // === КРИТИЧНОЕ ИСПРАВЛЕНИЕ: отключаем checksum заголовки ===
+    disableBodySigning: true,
   });
 }
 
 function getBucket() {
-  return process.env.YOS_BUCKET?.trim() || "smenuberu";
+  return process.env.YOS_BUCKET?.trim() || "bucket-eb10f6";
 }
 
 function getPublicBase(bucket: string) {
-  const fromEnv = process.env.YOS_PUBLIC_BASE?.trim();
-  if (fromEnv) return fromEnv.replace(/\/+$/, "");
-  return `https://${bucket}.storage.yandexcloud.net`;
+  // Публичный URL для Cloud.ru Evolution Object Storage
+  // Формат: https://<bucket>.s3.cloud.ru
+  return `https://${bucket}.s3.cloud.ru`;
 }
 
 function extFromContentType(ct: string) {
@@ -121,21 +123,17 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       const key = `objects/${parsed.data.objectId}/photos/${id}.${ext}`;
 
-      // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ №1: Отключаем checksum заголовки
       const cmd = new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         ContentType: ct,
-        ChecksumAlgorithm: undefined,
-        // Этот параметр предотвращает добавление x-amz-checksum-* заголовков
-        // @ts-ignore - параметр существует в рантайме, но не в типах
-        disableChecksum: true,
       });
 
-      // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ №2: Явно указываем заголовки для подписи
+      // Генерация presigned URL с правильными параметрами
       const uploadUrl = await getSignedUrl(s3, cmd, {
         expiresIn: 120,
-        signableHeaders: new Set(['host', 'content-type'])
+        // === КРИТИЧНОЕ ИСПРАВЛЕНИЕ: подписываем только content-type ===
+        signableHeaders: new Set(['content-type'])
       });
 
       const publicBase = getPublicBase(bucket);
@@ -182,19 +180,16 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       const key = `objects/${parsed.data.objectId}/logo/${id}.${ext}`;
 
-      // ТАКОЕ ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПА
       const cmd = new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         ContentType: ct,
-        ChecksumAlgorithm: undefined,
-        // @ts-ignore
-        disableChecksum: true,
       });
 
       const uploadUrl = await getSignedUrl(s3, cmd, {
         expiresIn: 120,
-        signableHeaders: new Set(['host', 'content-type'])
+        // === ТО ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПОВ ===
+        signableHeaders: new Set(['content-type'])
       });
 
       const publicBase = getPublicBase(bucket);
