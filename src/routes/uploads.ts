@@ -69,8 +69,14 @@ function makeS3() {
   });
 }
 
+function buildPublicUrl(publicBase: string, bucket: string, key: string) {
+  return `${publicBase.replace(/\/+$/, "")}/${bucket}/${key}`
+    .replace(/\/{2,}/g, "/")
+    .replace(":/", "://");
+}
+
 /**
- * ✅ ВАЖНО: экспорт называется uploadsRoutes
+ * ✅ Экспорт: uploadsRoutes
  */
 export async function uploadsRoutes(app: FastifyInstance) {
   /**
@@ -110,7 +116,7 @@ export async function uploadsRoutes(app: FastifyInstance) {
     const publicBase = mustEnv("YC_S3_PUBLIC_BASE_URL"); // например https://storage.yandexcloud.net
 
     const ext = sanitizeExtFromContentType(body.contentType);
-    const key = `objects/${body.objectId}/${crypto.randomUUID()}.${ext}`;
+    const key = `objects/${body.objectId}/photos/${crypto.randomUUID()}.${ext}`;
 
     const s3 = makeS3();
 
@@ -121,15 +127,57 @@ export async function uploadsRoutes(app: FastifyInstance) {
     });
 
     const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 60 });
+    const publicUrl = buildPublicUrl(publicBase, bucket, key);
 
-    const publicUrl = `${publicBase.replace(/\/+$/, "")}/${bucket}/${key}`
-      .replace(/\/{2,}/g, "/")
-      .replace(":/", "://");
+    return reply.send({ ok: true, uploadUrl, publicUrl });
+  });
 
-    return reply.send({
-      ok: true,
-      uploadUrl,
-      publicUrl,
+  /**
+   * ✅ NEW: POST /uploads/object-logo
+   * Body: { objectId, contentType }
+   * -> { ok: true, uploadUrl, publicUrl }
+   *
+   * Логотип НЕ считается в лимит photos=3.
+   */
+  app.post("/object-logo", async (req, reply) => {
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
+    const body = z
+      .object({
+        objectId: z.string().min(1),
+        contentType: z.string().min(1),
+      })
+      .parse(req.body);
+
+    // @ts-expect-error prisma is decorated in server.ts
+    const prisma = app.prisma;
+
+    const obj = await prisma.object.findUnique({
+      where: { id: body.objectId },
+      select: { id: true },
     });
+    if (!obj) return reply.code(404).send({ ok: false, error: "Object not found" });
+
+    const bucket = mustEnv("YC_S3_BUCKET"); // smenuberu
+    const publicBase = mustEnv("YC_S3_PUBLIC_BASE_URL");
+
+    const ext = sanitizeExtFromContentType(body.contentType);
+
+    // логотип можно перезаписывать — ключ делаем стабильным
+    const key = `objects/${body.objectId}/logo/logo.${ext}`;
+
+    const s3 = makeS3();
+
+    const cmd = new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: body.contentType,
+    });
+
+    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 60 });
+    const publicUrl = buildPublicUrl(publicBase, bucket, key);
+
+    return reply.send({ ok: true, uploadUrl, publicUrl });
   });
 }

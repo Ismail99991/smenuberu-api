@@ -10,6 +10,7 @@ import { slotsRoutes } from "./routes/slots";
 import { bookingsRoutes } from "./routes/bookings";
 import { objectsRoutes } from "./routes/objects";
 import { authRoutes } from "./routes/auth";
+import { geoRoutes } from "./routes/geo";
 import { uploadsRoutes } from "./routes/uploads";
 
 export function buildApp() {
@@ -58,6 +59,8 @@ export function buildApp() {
   app.register(slotsRoutes, { prefix: "/slots" });
   app.register(bookingsRoutes, { prefix: "/bookings" });
   app.register(bookingsMeRoutes, { prefix: "/bookings" });
+  app.register(geoRoutes, { prefix: "/geo" });
+
 
   // ✅ uploads (presigned URLs)
   app.register(uploadsRoutes, { prefix: "/uploads" });
