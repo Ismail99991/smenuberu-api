@@ -93,22 +93,29 @@ function avatarUrlFromYandex(default_avatar_id?: string): string | null {
 }
 
 export async function authRoutes(app: FastifyInstance) {
-  app.get("/yandex/start", async (req, reply) => {
+  app.get("/yandex/start", async (_req, reply) => {
     const clientId = process.env.YANDEX_CLIENT_ID ?? "";
     const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
     if (!clientId || !clientSecret) {
       return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set" });
     }
 
+    // @ts-expect-error prisma is decorated in server.ts
+    const prisma = app.prisma;
+
     const state = randomState();
     const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
 
-    reply.setCookie("yandex_oauth_state", state, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: true,
-      path: "/",
-      maxAge: 10 * 60
+    // state живёт 10 минут
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // сохраняем в БД (cookie не используем)
+    await prisma.oAuthState.create({
+      data: {
+        provider: "yandex",
+        state,
+        expiresAt
+      }
     });
 
     const url = yandexAuthorizeUrl({ clientId, redirectUri, state });
@@ -117,7 +124,6 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.get("/yandex/callback", async (req, reply) => {
     let stage = "init";
-
     try {
       const clientId = process.env.YANDEX_CLIENT_ID ?? "";
       const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
@@ -127,17 +133,31 @@ export async function authRoutes(app: FastifyInstance) {
 
       const code = typeof (req.query as any)?.code === "string" ? String((req.query as any).code) : "";
       const state = typeof (req.query as any)?.state === "string" ? String((req.query as any).state) : "";
-      const expectedState = (req.cookies as any)?.yandex_oauth_state ?? "";
 
       if (!code || !state) return reply.code(400).send({ ok: false, error: "missing code/state" });
-      if (!expectedState || state !== expectedState) {
-        return reply.code(400).send({ ok: false, error: "invalid state" });
-      }
-
-      const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
 
       // @ts-expect-error prisma is decorated in server.ts
       const prisma = app.prisma;
+
+      stage = "state_check_db";
+      const row = await prisma.oAuthState.findUnique({
+        where: { state },
+        select: { id: true, expiresAt: true, provider: true }
+      });
+
+      if (!row || row.provider !== "yandex") {
+        return reply.code(400).send({ ok: false, error: "invalid state" });
+      }
+
+      if (row.expiresAt.getTime() <= Date.now()) {
+        await prisma.oAuthState.delete({ where: { state } }).catch(() => {});
+        return reply.code(400).send({ ok: false, error: "state expired" });
+      }
+
+      // одноразовый: удаляем сразу
+      await prisma.oAuthState.delete({ where: { state } });
+
+      const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
 
       stage = "token_exchange_fetch";
       const token = await exchangeCodeForToken({ code, clientId, clientSecret, redirectUri });
@@ -184,10 +204,8 @@ export async function authRoutes(app: FastifyInstance) {
         sameSite: "none",
         secure: true,
         path: "/",
-        expires: expiresAt
+        expiresAT
       });
-
-      reply.clearCookie("yandex_oauth_state", { path: "/" });
 
       return reply.redirect(`${webUrlFromEnv()}/me`);
     } catch (err: any) {

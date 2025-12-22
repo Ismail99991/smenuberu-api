@@ -110,6 +110,18 @@ model Feedback {
   comment String?
 }
 
+model OAuthState {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  provider String
+  state    String   @unique
+  expiresAt DateTime
+
+  @@index([provider])
+  @@index([expiresAt])
+}
+
 model ReputationEvent {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
