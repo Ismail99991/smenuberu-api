@@ -185,8 +185,11 @@ export async function uploadsRoutes(app: FastifyInstance) {
         ContentType: ct,
       });
 
-      const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 120 });
-
+      const uploadUrl = await getSignedUrl(s3, cmd, {
+    expiresIn: 120,
+    // Ключевое исправление: Явно указываем заголовки для подписи
+    signableHeaders: new Set(['host', 'content-type'])
+});
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
 
