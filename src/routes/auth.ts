@@ -1,12 +1,18 @@
 import type { FastifyInstance } from "fastify";
 import crypto from "crypto";
 
+function normalizeBaseUrl(u: string) {
+  return String(u).replace(/\/+$/, "");
+}
+
 function baseUrlFromEnv() {
-  return process.env.API_BASE_URL ?? "https://smenuberu-api.onrender.com";
+  // ✅ важно: по умолчанию уже ваш прод API домен
+  return normalizeBaseUrl(process.env.API_BASE_URL ?? "https://api.smenube.ru");
 }
 
 function webUrlFromEnv() {
-  return process.env.WEB_URL ?? "http://localhost:3000";
+  // ✅ важно: по умолчанию ваш прод client домен
+  return normalizeBaseUrl(process.env.WEB_URL ?? "https://client.smenube.ru");
 }
 
 function cookieName() {
@@ -98,10 +104,12 @@ function avatarUrlFromYandex(default_avatar_id?: string): string | null {
  */
 function cookieDomainForReq(req: any): string | undefined {
   const host = String(req?.headers?.host ?? "");
+
   // localhost / 127.0.0.1 / локальные порты
   if (host.includes("localhost") || host.includes("127.0.0.1")) return undefined;
 
-  // Если ты уже перевёл API на api.smenube.ru — это то, что нужно
+  // если API живёт на smenube.ru поддоменах — шарим куку на весь eTLD+1
+  // api.smenube.ru / client.smenube.ru / www.smenube.ru
   return ".smenube.ru";
 }
 
@@ -135,7 +143,6 @@ export async function authRoutes(app: FastifyInstance) {
     });
 
     // ✅ + дублируем в cookie как fallback
-    // (для state cookie domain не обязателен, она нужна только для callback на API)
     reply.setCookie("yandex_oauth_state", state, {
       httpOnly: true,
       sameSite: "lax",
@@ -242,9 +249,7 @@ export async function authRoutes(app: FastifyInstance) {
 
       const domain = cookieDomainForReq(req);
 
-      // ✅ ВАЖНО ДЛЯ iOS/Safari:
-      // - при api.smenube.ru + www.smenube.ru это same-site, поэтому SameSite=Lax
-      // - Domain=.smenube.ru чтобы кука была общая для поддоменов
+      // ✅ кука общая для поддоменов smenube.ru
       reply.setCookie(cookieName(), rawSessionToken, {
         httpOnly: true,
         secure: true,
@@ -254,6 +259,7 @@ export async function authRoutes(app: FastifyInstance) {
         ...(domain ? { domain } : {})
       });
 
+      // ✅ редирект на client (а не localhost)
       return reply.redirect(`${webUrlFromEnv()}/me`);
     } catch (err: any) {
       app.log.error({ err, stage }, "auth yandex callback failed");
