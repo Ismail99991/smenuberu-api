@@ -129,11 +129,19 @@ export async function uploadsRoutes(app: FastifyInstance) {
         Bucket: bucket,
         Key: key,
         ContentType: ct,
-        // Бакет у тебя публичный — но на всякий случай делаем объект public-read
+        // ==== КРИТИЧНОЕ ИСПРАВЛЕНИЕ №1: Отключаем автоматическую checksum ====
+        // SDK по умолчанию добавляет x-amz-checksum-crc32, что ломает подпись
+        ChecksumAlgorithm: undefined,
       });
 
       // пресайн на 2 минуты
-      const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 120 });
+      const uploadUrl = await getSignedUrl(s3, cmd, {
+        expiresIn: 120,
+        // ==== КРИТИЧНОЕ ИСПРАВЛЕНИЕ №2: Явно указываем подписываемые заголовки ====
+        // Если этого не сделать, подпись будет только для "host", а фронтенд
+        // отправляет ещё "Content-Type", что приводит к ошибке 403
+        signableHeaders: new Set(['host', 'content-type'])
+      });
 
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
@@ -183,13 +191,16 @@ export async function uploadsRoutes(app: FastifyInstance) {
         Bucket: bucket,
         Key: key,
         ContentType: ct,
+        // ==== ТАКОЕ ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПА ====
+        ChecksumAlgorithm: undefined,
       });
 
       const uploadUrl = await getSignedUrl(s3, cmd, {
-    expiresIn: 120,
-    // Ключевое исправление: Явно указываем заголовки для подписи
-    signableHeaders: new Set(['host', 'content-type'])
-});
+        expiresIn: 120,
+        // ==== ТАКОЕ ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПА ====
+        signableHeaders: new Set(['host', 'content-type'])
+      });
+
       const publicBase = getPublicBase(bucket);
       const publicUrl = `${publicBase}/${key}`;
 
