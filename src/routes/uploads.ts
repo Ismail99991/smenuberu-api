@@ -11,6 +11,9 @@ function sha256Hex(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
 
+/**
+ * Достаём userId из cookie-сессии.
+ */
 async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
   const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
   if (!sessionToken) return null;
@@ -43,21 +46,21 @@ function requireEnv(name: string): string {
   return String(v).trim();
 }
 
+function getBucket() {
+  return process.env.SUPABASE_BUCKET?.trim() || "uploads";
+}
+
 function getSupabaseAdmin() {
   const url = requireEnv("SUPABASE_URL");
-  const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY"); // важно: service role, только на сервере
+  const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY"); // только сервер
 
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
 
-function getBucket() {
-  return process.env.SUPABASE_BUCKET?.trim() || "uploads";
-}
-
 function extFromContentType(ct: string) {
-  const c = ct.toLowerCase();
+  const c = (ct || "").toLowerCase();
   if (c.includes("png")) return "png";
   if (c.includes("jpeg") || c.includes("jpg")) return "jpg";
   if (c.includes("webp")) return "webp";
@@ -65,49 +68,101 @@ function extFromContentType(ct: string) {
   return "bin";
 }
 
-const uploadSchema = z.object({
+const objectUploadSchema = z.object({
   objectId: z.string().min(1),
   contentType: z.string().min(1),
 });
+
+const draftUploadSchema = z.object({
+  draftId: z.string().min(1),
+  contentType: z.string().min(1),
+});
+
+type PresignResponse = { ok: true; uploadUrl: string; publicUrl: string; path: string };
 
 export async function uploadsRoutes(app: FastifyInstance) {
   const supabase = getSupabaseAdmin();
   const bucket = getBucket();
 
-  /**
-   * Хелпер: создать signed upload URL + public URL
-   */
-  async function makeUpload(objectId: string, contentType: string, kind: "photos" | "logo") {
-    const ct = contentType.trim();
-    const ext = extFromContentType(ct);
-    const id = crypto.randomUUID();
+  async function createSignedUpload(path: string, contentType: string): Promise<PresignResponse> {
+    // createSignedUploadUrl не “запирает” Content-Type как S3, но мы всё равно передаём ct клиенту.
+    const { data, error } = await supabase.storage.from(bucket).createSignedUploadUrl(path);
+    if (error || !data) throw new Error(error?.message ?? "createSignedUploadUrl failed");
 
-    const path =
-      kind === "photos"
-        ? `objects/${objectId}/photos/${id}.${ext}`
-        : `objects/${objectId}/logo/${id}.${ext}`;
-
-    // Supabase выдаёт URL для загрузки (обычно валиден ~ 60 сек; можно задавать expiresIn)
-    // Важно: content-type не “подписывается” как в S3 — просто при PUT укажи тот же Content-Type.
-    const { data, error } = await supabase.storage
-      .from(bucket)
-      .createSignedUploadUrl(path,  { upsert: false }); // секунды
-
-    if (error || !data) {
-      throw new Error(error?.message ?? "createSignedUploadUrl failed");
-    }
-
-    // publicUrl будет работать только если bucket public.
-    // Если bucket private — вместо publicUrl выдавай signed download url.
+    // publicUrl работает только если bucket public.
     const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path);
 
     return {
-      uploadUrl: data.signedUrl, // сюда фронт делает PUT
-      token: data.token,         // полезно, если захочешь подтверждать upload (см. примечание ниже)
+      ok: true,
+      uploadUrl: data.signedUrl,
       publicUrl: pub.publicUrl,
       path,
     };
   }
+
+  // -----------------------
+  // DRAFT UPLOADS (без БД)
+  // -----------------------
+
+  /**
+   * POST /uploads/draft-logo
+   * body: { draftId, contentType }
+   * -> { ok:true, uploadUrl, publicUrl, path }
+   */
+  app.post("/draft-logo", async (req, reply) => {
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
+    const parsed = draftUploadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
+    }
+
+    try {
+      const ct = parsed.data.contentType.trim();
+      const ext = extFromContentType(ct);
+      const id = crypto.randomUUID();
+
+      const path = `drafts/${userId}/${parsed.data.draftId}/logo/${id}.${ext}`;
+      const r = await createSignedUpload(path, ct);
+      return reply.send(r);
+    } catch (err: any) {
+      app.log.error({ err }, "uploads/draft-logo failed");
+      return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
+    }
+  });
+
+  /**
+   * POST /uploads/draft-photo
+   * body: { draftId, contentType }
+   * -> { ok:true, uploadUrl, publicUrl, path }
+   */
+  app.post("/draft-photo", async (req, reply) => {
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
+    const parsed = draftUploadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
+    }
+
+    try {
+      const ct = parsed.data.contentType.trim();
+      const ext = extFromContentType(ct);
+      const id = crypto.randomUUID();
+
+      const path = `drafts/${userId}/${parsed.data.draftId}/photos/${id}.${ext}`;
+      const r = await createSignedUpload(path, ct);
+      return reply.send(r);
+    } catch (err: any) {
+      app.log.error({ err }, "uploads/draft-photo failed");
+      return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
+    }
+  });
+
+  // -----------------------
+  // OBJECT UPLOADS (как было)
+  // -----------------------
 
   /**
    * POST /uploads/object-photo
@@ -118,7 +173,7 @@ export async function uploadsRoutes(app: FastifyInstance) {
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
-    const parsed = uploadSchema.safeParse(req.body);
+    const parsed = objectUploadSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
     }
@@ -134,8 +189,13 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
-      const r = await makeUpload(parsed.data.objectId, parsed.data.contentType, "photos");
-      return reply.send({ ok: true, uploadUrl: r.uploadUrl, publicUrl: r.publicUrl, path: r.path });
+      const ct = parsed.data.contentType.trim();
+      const ext = extFromContentType(ct);
+      const id = crypto.randomUUID();
+
+      const path = `objects/${parsed.data.objectId}/photos/${id}.${ext}`;
+      const r = await createSignedUpload(path, ct);
+      return reply.send(r);
     } catch (err: any) {
       app.log.error({ err }, "uploads/object-photo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
@@ -144,12 +204,14 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
   /**
    * POST /uploads/object-logo
+   * body: { objectId, contentType }
+   * -> { ok:true, uploadUrl, publicUrl, path }
    */
   app.post("/object-logo", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
-    const parsed = uploadSchema.safeParse(req.body);
+    const parsed = objectUploadSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: "invalid payload", issues: parsed.error.issues });
     }
@@ -165,8 +227,13 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
-      const r = await makeUpload(parsed.data.objectId, parsed.data.contentType, "logo");
-      return reply.send({ ok: true, uploadUrl: r.uploadUrl, publicUrl: r.publicUrl, path: r.path });
+      const ct = parsed.data.contentType.trim();
+      const ext = extFromContentType(ct);
+      const id = crypto.randomUUID();
+
+      const path = `objects/${parsed.data.objectId}/logo/${id}.${ext}`;
+      const r = await createSignedUpload(path, ct);
+      return reply.send(r);
     } catch (err: any) {
       app.log.error({ err }, "uploads/object-logo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
