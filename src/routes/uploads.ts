@@ -91,7 +91,7 @@ export async function uploadsRoutes(app: FastifyInstance) {
     // Важно: content-type не “подписывается” как в S3 — просто при PUT укажи тот же Content-Type.
     const { data, error } = await supabase.storage
       .from(bucket)
-      .createSignedUploadUrl(path, 120); // секунды
+      .createSignedUploadUrl(path,  { upsert: false }); // секунды
 
     if (error || !data) {
       throw new Error(error?.message ?? "createSignedUploadUrl failed");
