@@ -1,8 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import crypto from "crypto";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createClient } from "@supabase/supabase-js";
 
 function cookieName() {
   return process.env.AUTH_COOKIE_NAME ?? "smenuberu_session";
@@ -12,9 +11,6 @@ function sha256Hex(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
 
-/**
- * Достаём userId из cookie-сессии.
- */
 async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
   const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
   if (!sessionToken) return null;
@@ -47,31 +43,17 @@ function requireEnv(name: string): string {
   return String(v).trim();
 }
 
-function getS3() {
-  // Cloud.ru Evolution Object Storage (S3-compatible)
-  const endpoint = process.env.YOS_ENDPOINT?.trim() || "https://s3.cloud.ru";
-  const region = process.env.YOS_REGION?.trim() || "ru-central-1";
-  const accessKeyId = requireEnv("YOS_ACCESS_KEY_ID");
-  const secretAccessKey = requireEnv("YOS_SECRET_ACCESS_KEY");
+function getSupabaseAdmin() {
+  const url = requireEnv("SUPABASE_URL");
+  const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY"); // важно: service role, только на сервере
 
-  return new S3Client({
-    region,
-    endpoint,
-    credentials: { accessKeyId, secretAccessKey },
-    forcePathStyle: false,
-    // === КРИТИЧНОЕ ИСПРАВЛЕНИЕ: отключаем checksum заголовки ===
-    disableBodySigning: true,
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
   });
 }
 
 function getBucket() {
-  return process.env.YOS_BUCKET?.trim() || "bucket-eb10f6";
-}
-
-function getPublicBase(bucket: string) {
-  // Публичный URL для Cloud.ru Evolution Object Storage
-  // Формат: https://<bucket>.s3.cloud.ru
-  return `https://${bucket}.s3.cloud.ru`;
+  return process.env.SUPABASE_BUCKET?.trim() || "uploads";
 }
 
 function extFromContentType(ct: string) {
@@ -89,10 +71,48 @@ const uploadSchema = z.object({
 });
 
 export async function uploadsRoutes(app: FastifyInstance) {
+  const supabase = getSupabaseAdmin();
+  const bucket = getBucket();
+
+  /**
+   * Хелпер: создать signed upload URL + public URL
+   */
+  async function makeUpload(objectId: string, contentType: string, kind: "photos" | "logo") {
+    const ct = contentType.trim();
+    const ext = extFromContentType(ct);
+    const id = crypto.randomUUID();
+
+    const path =
+      kind === "photos"
+        ? `objects/${objectId}/photos/${id}.${ext}`
+        : `objects/${objectId}/logo/${id}.${ext}`;
+
+    // Supabase выдаёт URL для загрузки (обычно валиден ~ 60 сек; можно задавать expiresIn)
+    // Важно: content-type не “подписывается” как в S3 — просто при PUT укажи тот же Content-Type.
+    const { data, error } = await supabase.storage
+      .from(bucket)
+      .createSignedUploadUrl(path, 120); // секунды
+
+    if (error || !data) {
+      throw new Error(error?.message ?? "createSignedUploadUrl failed");
+    }
+
+    // publicUrl будет работать только если bucket public.
+    // Если bucket private — вместо publicUrl выдавай signed download url.
+    const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path);
+
+    return {
+      uploadUrl: data.signedUrl, // сюда фронт делает PUT
+      token: data.token,         // полезно, если захочешь подтверждать upload (см. примечание ниже)
+      publicUrl: pub.publicUrl,
+      path,
+    };
+  }
+
   /**
    * POST /uploads/object-photo
    * body: { objectId, contentType }
-   * -> { ok:true, uploadUrl, publicUrl, key }
+   * -> { ok:true, uploadUrl, publicUrl, path }
    */
   app.post("/object-photo", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -114,32 +134,8 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
-      const bucket = getBucket();
-      const s3 = getS3();
-
-      const ct = parsed.data.contentType.trim();
-      const ext = extFromContentType(ct);
-      const id = crypto.randomUUID();
-
-      const key = `objects/${parsed.data.objectId}/photos/${id}.${ext}`;
-
-      const cmd = new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        ContentType: ct,
-      });
-
-      // Генерация presigned URL с правильными параметрами
-      const uploadUrl = await getSignedUrl(s3, cmd, {
-        expiresIn: 120,
-        // === КРИТИЧНОЕ ИСПРАВЛЕНИЕ: подписываем только content-type ===
-        signableHeaders: new Set(['content-type'])
-      });
-
-      const publicBase = getPublicBase(bucket);
-      const publicUrl = `${publicBase}/${key}`;
-
-      return reply.send({ ok: true, uploadUrl, publicUrl, key });
+      const r = await makeUpload(parsed.data.objectId, parsed.data.contentType, "photos");
+      return reply.send({ ok: true, uploadUrl: r.uploadUrl, publicUrl: r.publicUrl, path: r.path });
     } catch (err: any) {
       app.log.error({ err }, "uploads/object-photo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
@@ -148,8 +144,6 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
   /**
    * POST /uploads/object-logo
-   * body: { objectId, contentType }
-   * -> { ok:true, uploadUrl, publicUrl, key }
    */
   app.post("/object-logo", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -171,31 +165,8 @@ export async function uploadsRoutes(app: FastifyInstance) {
 
       if (!object) return reply.code(404).send({ ok: false, error: "Object not found" });
 
-      const bucket = getBucket();
-      const s3 = getS3();
-
-      const ct = parsed.data.contentType.trim();
-      const ext = extFromContentType(ct);
-      const id = crypto.randomUUID();
-
-      const key = `objects/${parsed.data.objectId}/logo/${id}.${ext}`;
-
-      const cmd = new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        ContentType: ct,
-      });
-
-      const uploadUrl = await getSignedUrl(s3, cmd, {
-        expiresIn: 120,
-        // === ТО ЖЕ ИСПРАВЛЕНИЕ ДЛЯ ЛОГОТИПОВ ===
-        signableHeaders: new Set(['content-type'])
-      });
-
-      const publicBase = getPublicBase(bucket);
-      const publicUrl = `${publicBase}/${key}`;
-
-      return reply.send({ ok: true, uploadUrl, publicUrl, key });
+      const r = await makeUpload(parsed.data.objectId, parsed.data.contentType, "logo");
+      return reply.send({ ok: true, uploadUrl: r.uploadUrl, publicUrl: r.publicUrl, path: r.path });
     } catch (err: any) {
       app.log.error({ err }, "uploads/object-logo failed");
       return reply.code(500).send({ ok: false, error: "upload presign failed", message: err?.message ?? String(err) });
