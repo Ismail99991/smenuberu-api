@@ -13,6 +13,7 @@ import { objectsRoutes } from "./routes/objects";
 import { authRoutes } from "./routes/auth";
 import { uploadsRoutes } from "./routes/uploads";
 import { geoRoutes } from "./routes/geo";
+import { dashboardRoutes } from "./routes/dashboard";
 
 function isAllowedOrigin(origin: string) {
   // allow localhost
@@ -49,6 +50,9 @@ export function buildApp() {
   app.decorate("prisma", prisma);
 
   app.register(cookie);
+
+  
+app.register(dashboardRoutes);
 
   // ✅ CORS + preflight
   app.register(cors, {
