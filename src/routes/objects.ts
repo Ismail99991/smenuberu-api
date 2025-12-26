@@ -112,7 +112,7 @@ export async function objectsRoutes(app: FastifyInstance) {
         hasBus: true,
         isPremium: true,
         hasFood: true,
-        isFavorite: true,
+        // isFavorite: true, //
 
         type: true,
         logoUrl: true,
@@ -131,6 +131,7 @@ export async function objectsRoutes(app: FastifyInstance) {
     return rows.map((o: any) => ({
       ...o,
       photos: Array.isArray(o.photos) ? o.photos.map((p: any) => p.url) : [],
+      isFavorite: false,
     }));
   });
 
