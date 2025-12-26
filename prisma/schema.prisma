@@ -14,18 +14,16 @@ model User {
 
   displayName String?
 
-  // ✅ Yandex OAuth identity
+  // Yandex OAuth
   yandexId    String? @unique
   yandexLogin String?
   avatarUrl   String?
   email       String?
 
-  // auth sessions
-  sessions Session[]
-
-  bookings         Booking[]
-  reputationEvents ReputationEvent[]
-  feedbacks        Feedback[]
+  sessions          Session[]
+  bookings          Booking[]
+  reputationEvents  ReputationEvent[]
+  feedbacks         Feedback[]
 }
 
 model Session {
@@ -35,10 +33,7 @@ model Session {
   userId String
   user   User   @relation(fields: [userId], references: [id])
 
-  // хранить только хэш токена (не сырой токен)
   tokenHash String @unique
-
-  // когда сессия истекает
   expiresAt DateTime
 
   @@index([userId])
@@ -53,19 +48,10 @@ model Object {
   city    String
   address String?
 
- // ✅ координаты для карты (пины)
-  lat     Float?
-  lng     Float?
-
   // ✅ UI поля (web/client)
   type    String?
   logoUrl String?
 
-  // ✅ UI поля (web/client)
-  type    String?
-  logoUrl String?
-
-  // ✅ фото объекта (2–3), порядок через position
   photos ObjectPhoto[]
 
   slots     Slot[]
