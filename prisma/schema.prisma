@@ -56,6 +56,9 @@ model Object {
   lat      Float?
   lng      Float?
 
+  hasBus    Boolean  @default(false)
+  isPremium Boolean  @default(false)
+  hasFood   Boolean  @default(false)
 
   photos ObjectPhoto[]
 
