@@ -59,6 +59,7 @@ model Object {
   hasBus    Boolean  @default(false)
   isPremium Boolean  @default(false)
   hasFood   Boolean  @default(false)
+  isFavorite Boolean @default(false)
 
   photos ObjectPhoto[]
 
