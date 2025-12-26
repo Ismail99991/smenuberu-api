@@ -10,6 +10,10 @@ const urlOrEmpty = z
 
 const photosSchema = z.array(urlOrEmpty).max(3);
 
+// ✅ координаты (nullable), валидируем диапазоны
+const latSchema = z.number().min(-90).max(90);
+const lngSchema = z.number().min(-180).max(180);
+
 const createObjectSchema = z.object({
   name: z.string().min(1),
   city: z.string().min(1),
@@ -19,6 +23,10 @@ const createObjectSchema = z.object({
   type: z.string().min(1).optional().nullable(),
   logoUrl: urlOrEmpty.optional().nullable(),
   photos: photosSchema.optional().nullable(),
+
+  // ✅ lat/lng (optional)
+  lat: latSchema.optional().nullable(),
+  lng: lngSchema.optional().nullable(),
 });
 
 const updateObjectSchema = z.object({
@@ -33,6 +41,10 @@ const updateObjectSchema = z.object({
   // - массив => заменить
   // - null => очистить
   photos: photosSchema.optional().nullable(),
+
+  // ✅ lat/lng (optional)
+  lat: latSchema.optional().nullable(),
+  lng: lngSchema.optional().nullable(),
 });
 
 function normalizeOptString(x: unknown): string | null | undefined {
@@ -99,6 +111,11 @@ export async function objectsRoutes(app: FastifyInstance) {
 
         type: true,
         logoUrl: true,
+
+        // ✅ lat/lng
+        lat: true,
+        lng: true,
+
         photos: {
           orderBy: { position: "asc" },
           select: { url: true, position: true },
@@ -132,6 +149,11 @@ export async function objectsRoutes(app: FastifyInstance) {
 
         type: true,
         logoUrl: true,
+
+        // ✅ lat/lng
+        lat: true,
+        lng: true,
+
         photos: {
           orderBy: { position: "asc" },
           select: { url: true, position: true },
@@ -171,6 +193,18 @@ export async function objectsRoutes(app: FastifyInstance) {
     const logoUrl = parsed.data.logoUrl == null ? null : String(parsed.data.logoUrl).trim();
     const photos = parsed.data.photos ?? undefined;
 
+    // ✅ координаты
+    const lat = parsed.data.lat ?? null;
+    const lng = parsed.data.lng ?? null;
+
+    // Если передали только одну координату — считаем это ошибкой (чтобы не плодить мусор)
+    if ((lat === null) !== (lng === null)) {
+      return reply.code(400).send({
+        ok: false,
+        error: "lat/lng must be both set or both null",
+      });
+    }
+
     const created = await prisma.object.create({
       data: {
         name: parsed.data.name.trim(),
@@ -179,6 +213,10 @@ export async function objectsRoutes(app: FastifyInstance) {
 
         type: type === undefined ? undefined : type,
         logoUrl: parsed.data.logoUrl === undefined ? undefined : logoUrl,
+
+        // ✅ сохраняем lat/lng (если есть)
+        lat: lat === null ? null : lat,
+        lng: lng === null ? null : lng,
 
         photos:
           Array.isArray(photos) && photos.length > 0
@@ -199,6 +237,11 @@ export async function objectsRoutes(app: FastifyInstance) {
 
         type: true,
         logoUrl: true,
+
+        // ✅ lat/lng
+        lat: true,
+        lng: true,
+
         photos: {
           orderBy: { position: "asc" },
           select: { url: true, position: true },
@@ -261,6 +304,27 @@ export async function objectsRoutes(app: FastifyInstance) {
       data.logoUrl = l == null ? null : String(l).trim();
     }
 
+    // ✅ lat/lng update
+    const latProvided = "lat" in parsed.data;
+    const lngProvided = "lng" in parsed.data;
+
+    if (latProvided || lngProvided) {
+      const lat = (parsed.data as any).lat ?? null;
+      const lng = (parsed.data as any).lng ?? null;
+
+      // если трогали координаты — должны трогать обе
+      if ((lat === null) !== (lng === null)) {
+        return reply.code(400).send({
+          ok: false,
+          error: "lat/lng must be both set or both null",
+        });
+      }
+
+      // записываем (null тоже допустим — “очистить координаты”)
+      if (latProvided) data.lat = lat;
+      if (lngProvided) data.lng = lng;
+    }
+
     const photosProvided = "photos" in parsed.data;
 
     // ВАЖНО: фото заменяем только если поле photos реально передали
@@ -303,6 +367,11 @@ export async function objectsRoutes(app: FastifyInstance) {
           createdAt: true,
           type: true,
           logoUrl: true,
+
+          // ✅ lat/lng
+          lat: true,
+          lng: true,
+
           photos: { orderBy: { position: "asc" }, select: { url: true, position: true } },
         },
       });
@@ -326,6 +395,11 @@ export async function objectsRoutes(app: FastifyInstance) {
 
         type: true,
         logoUrl: true,
+
+        // ✅ lat/lng
+        lat: true,
+        lng: true,
+
         photos: { orderBy: { position: "asc" }, select: { url: true, position: true } },
       },
     });
