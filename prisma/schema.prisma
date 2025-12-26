@@ -52,6 +52,11 @@ model Object {
   type    String?
   logoUrl String?
 
+// ✅ Координаты для карты (ДОБАВЬТЕ ЭТО)
+  lat      Float?
+  lng      Float?
+
+
   photos ObjectPhoto[]
 
   slots     Slot[]
