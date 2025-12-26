@@ -53,6 +53,14 @@ model Object {
   city    String
   address String?
 
+ // ✅ координаты для карты (пины)
+  lat     Float?
+  lng     Float?
+
+  // ✅ UI поля (web/client)
+  type    String?
+  logoUrl String?
+
   // ✅ UI поля (web/client)
   type    String?
   logoUrl String?
