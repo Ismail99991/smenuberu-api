@@ -110,8 +110,9 @@ export async function objectsRoutes(app: FastifyInstance) {
         createdAt: true,
 
         hasBus: true,
-      isPremium: true,
-      hasFood: true,
+        isPremium: true,
+        hasFood: true,
+        isFavorite: true,
 
         type: true,
         logoUrl: true,
