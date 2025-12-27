@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "Object" ADD COLUMN     "hasBus" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "hasFood" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "isFavorite" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "isPremium" BOOLEAN NOT NULL DEFAULT false;

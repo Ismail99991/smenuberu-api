@@ -173,6 +173,7 @@ enum BookingStatus {
   booked
   cancelled
   completed
+  checkin_requested
 }
 
 enum ReputationEventType {
