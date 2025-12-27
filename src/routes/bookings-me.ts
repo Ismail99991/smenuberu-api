@@ -11,10 +11,6 @@ function sha256Hex(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
 
-/**
- * Достаём userId из текущей cookie-сессии (как в /auth/me),
- * без дублирования бизнес-логики на фронте.
- */
 async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
   const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
   if (!sessionToken) return null;
@@ -48,7 +44,7 @@ function unauthorized(reply: any) {
 export async function bookingsMeRoutes(app: FastifyInstance) {
   /**
    * GET /bookings/me?status=booked|cancelled|...
-   * По умолчанию отдаём ТОЛЬКО активные "booked" (то есть “Забронированные”).
+   * По умолчанию отдаём ТОЛЬКО "booked" (как было).
    */
   app.get("/me", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -69,17 +65,26 @@ export async function bookingsMeRoutes(app: FastifyInstance) {
         id: true,
         status: true,
         createdAt: true,
+
+        // ✅ ФАКТ (реальное время)
+        startsAt: true,
+        endsAt: true,
+
+        // ✅ ПЛАН (расписание слота)
         slot: {
           select: {
             id: true,
-            startsAt: true,
-            endsAt: true,
-            // если у вас не startsAt/endsAt, а date/startTime/endTime — просто замени селект
+            date: true,
+            startTime: true,
+            endTime: true,
             object: {
               select: {
                 id: true,
                 name: true,
                 address: true,
+                city: true,
+                lat: true,
+                lng: true,
               },
             },
           },

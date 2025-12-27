@@ -113,6 +113,9 @@ model Booking {
 
   status BookingStatus
 
+  startsAt DateTime?
+  endsAt   DateTime?
+
   @@index([userId, status])
   @@index([slotId])
 }
