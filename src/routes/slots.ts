@@ -1,5 +1,9 @@
 import type { FastifyInstance } from "fastify";
+import crypto from "crypto";
 
+/**
+ * ВСПОМОГАТЕЛЬНОЕ: форматирование/парсинг даты-времени
+ */
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
@@ -34,6 +38,61 @@ function toUtcDateTime(date: string, hhmm: string): Date | null {
   return new Date(Date.UTC(d.y, d.mo - 1, d.d, t.hh, t.mm, 0));
 }
 
+/**
+ * ✅ GEO: расстояние между двумя координатами (метры)
+ */
+function haversineMeters(aLat: number, aLng: number, bLat: number, bLng: number) {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const lat1 = toRad(aLat);
+  const lat2 = toRad(bLat);
+
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * (Math.sin(dLng / 2) ** 2);
+
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+/**
+ * ✅ AUTH utils (скопировано по стилю из objects.ts)
+ */
+function cookieName() {
+  return process.env.AUTH_COOKIE_NAME ?? "smenuberu_session";
+}
+
+function sha256Hex(s: string) {
+  return crypto.createHash("sha256").update(s).digest("hex");
+}
+
+async function getUserIdFromSession(app: FastifyInstance, req: any): Promise<string | null> {
+  const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
+  if (!sessionToken) return null;
+
+  const tokenHash = sha256Hex(String(sessionToken));
+
+  // @ts-expect-error prisma is decorated in server.ts
+  const prisma = app.prisma;
+
+  const now = new Date();
+
+  const session = await prisma.session.findUnique({
+    where: { tokenHash },
+    select: { expiresAt: true, userId: true },
+  });
+
+  if (!session) return null;
+
+  if (session.expiresAt.getTime() <= now.getTime()) {
+    await prisma.session.delete({ where: { tokenHash } }).catch(() => {});
+    return null;
+  }
+
+  return session.userId;
+}
+
 export async function slotsRoutes(app: FastifyInstance) {
   /**
    * GET /slots
@@ -45,7 +104,7 @@ export async function slotsRoutes(app: FastifyInstance) {
 
     const rows = await prisma.slot.findMany({
       orderBy: [{ date: "desc" }, { startTime: "asc" }],
-      include: { object: true }
+      include: { object: true },
     });
 
     return rows.map((s: any) => ({
@@ -58,7 +117,7 @@ export async function slotsRoutes(app: FastifyInstance) {
       time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
       pay: s.pay,
       hot: s.hot,
-      type: s.type
+      type: s.type,
     }));
   });
 
@@ -71,7 +130,7 @@ export async function slotsRoutes(app: FastifyInstance) {
 
     const rows = await prisma.slot.findMany({
       orderBy: [{ date: "asc" }, { startTime: "asc" }],
-      include: { object: true }
+      include: { object: true },
     });
 
     return rows.map((s: any) => ({
@@ -85,7 +144,7 @@ export async function slotsRoutes(app: FastifyInstance) {
       pay: s.pay,
       hot: s.hot,
       tags: [],
-      type: s.type
+      type: s.type,
     }));
   });
 
@@ -100,7 +159,7 @@ export async function slotsRoutes(app: FastifyInstance) {
 
     const s = await prisma.slot.findUnique({
       where: { id },
-      include: { object: true }
+      include: { object: true },
     });
 
     if (!s) return reply.code(404).send({ ok: false, error: "not found" });
@@ -115,7 +174,7 @@ export async function slotsRoutes(app: FastifyInstance) {
       time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
       pay: s.pay,
       hot: s.hot,
-      type: s.type
+      type: s.type,
     });
   });
 
@@ -150,8 +209,8 @@ export async function slotsRoutes(app: FastifyInstance) {
           endTime: "HH:MM",
           pay: 3500,
           type: "loader",
-          hot: false
-        }
+          hot: false,
+        },
       });
     }
 
@@ -169,7 +228,7 @@ export async function slotsRoutes(app: FastifyInstance) {
 
     const obj = await prisma.object.findUnique({
       where: { id: objectId },
-      select: { id: true }
+      select: { id: true },
     });
 
     if (!obj) return reply.code(400).send({ ok: false, error: "object not found" });
@@ -183,10 +242,77 @@ export async function slotsRoutes(app: FastifyInstance) {
         endTime,
         pay: Math.round(payNum),
         type,
-        hot
-      }
+        hot,
+      },
     });
 
     return reply.code(201).send(created);
+  });
+
+  /**
+   * ✅ MVP: "Начать смену"
+   * POST /slots/:id/start
+   *
+   * Текущая минимальная логика:
+   * - пользователь должен быть авторизован
+   * - слот должен быть забронирован им (booking.status === "booked")
+   * - если у объекта есть lat/lng: проверяем дистанцию <= 120м
+   * - не раньше чем за 15 минут до startTime
+   * - переводим booking.status => "checkin_requested"
+   *
+   * ВАЖНО: это "первый шаг". Дальше добавим confirm-start от owner.
+   */
+  app.post("/:id/start", async (req, reply) => {
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
+    // @ts-expect-error prisma is decorated in server.ts
+    const prisma = app.prisma;
+
+    const { id: slotId } = req.params as any;
+    const body = req.body as any;
+
+    const lat = Number(body?.lat);
+    const lng = Number(body?.lng);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return reply.code(400).send({ ok: false, error: "lat/lng required" });
+    }
+
+    const slot = await prisma.slot.findUnique({
+      where: { id: slotId },
+      include: { object: true, bookings: true },
+    });
+
+    if (!slot) return reply.code(404).send({ ok: false, error: "slot not found" });
+
+    // Ищем бронь текущего юзера со статусом booked
+    const booking = (slot.bookings ?? []).find((b: any) => b.userId === userId && b.status === "booked");
+    if (!booking) return reply.code(403).send({ ok: false, error: "not your booked slot" });
+
+    // Проверка времени: не раньше чем за 15 минут до старта
+    const now = new Date();
+    const earliest = new Date(slot.startTime.getTime() - 15 * 60000);
+    if (now.getTime() < earliest.getTime()) {
+      return reply.code(400).send({ ok: false, error: "too early" });
+    }
+
+    // Проверка гео: если у объекта есть координаты
+    const oLat = slot.object?.lat;
+    const oLng = slot.object?.lng;
+    if (oLat != null && oLng != null) {
+      const distM = haversineMeters(lat, lng, oLat, oLng);
+      if (distM > 120) {
+        return reply.code(400).send({ ok: false, error: "too far from object", distanceM: Math.round(distM) });
+      }
+    }
+
+    // Переводим бронь в checkin_requested
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: { status: "checkin_requested" },
+    });
+
+    return reply.send({ ok: true });
   });
 }
