@@ -20,10 +20,24 @@ model User {
   avatarUrl   String?
   email       String?
 
+  // ✅ Персональный QR исполнителя (генерируется при регистрации)
+  // nullable + unique: в Postgres это ок (много NULL допускается)
+  performerQrToken String? @unique
+
   sessions          Session[]
   bookings          Booking[]
   reputationEvents  ReputationEvent[]
   feedbacks         Feedback[]
+
+  // ✅ Слоты/смены, которые создал пользователь (старший смены)
+  createdSlots Slot[] @relation("SlotCreatedBy")
+
+  // ✅ Подтверждения смен (кто подтвердил)
+  startConfirmedBookings Booking[] @relation("BookingStartConfirmedBy")
+  endConfirmedBookings   Booking[] @relation("BookingEndConfirmedBy")
+
+  // ✅ Геопинги исполнителя при показе QR
+  geoPings UserGeoPing[]
 }
 
 model Session {
@@ -52,13 +66,13 @@ model Object {
   type    String?
   logoUrl String?
 
-// ✅ Координаты для карты (ДОБАВЬТЕ ЭТО)
-  lat      Float?
-  lng      Float?
+  // ✅ Координаты объекта (для проверки 200м)
+  lat Float?
+  lng Float?
 
-  hasBus    Boolean  @default(false)
-  isPremium Boolean  @default(false)
-  hasFood   Boolean  @default(false)
+  hasBus     Boolean @default(false)
+  isPremium  Boolean @default(false)
+  hasFood    Boolean @default(false)
   isFavorite Boolean @default(false)
 
   photos ObjectPhoto[]
@@ -88,7 +102,13 @@ model Slot {
   objectId String
   object   Object @relation(fields: [objectId], references: [id])
 
+  // ✅ Старший смены = тот, кто создал слот
+  createdById String?
+  createdBy   User?   @relation("SlotCreatedBy", fields: [createdById], references: [id])
+
   date      DateTime
+
+  // ✅ ПЛАНОВОЕ время смены (не путать с Booking.startsAt/endsAt)
   startTime DateTime
   endTime   DateTime
 
@@ -99,6 +119,8 @@ model Slot {
 
   bookings  Booking[]
   feedbacks Feedback[]
+
+  @@index([createdById])
 }
 
 model Booking {
@@ -113,11 +135,42 @@ model Booking {
 
   status BookingStatus
 
+  // ✅ ФАКТИЧЕСКОЕ прибытие/убытие исполнителя (не путать с Slot.startTime/endTime)
   startsAt DateTime?
   endsAt   DateTime?
 
+  // ✅ Подтверждение начала смены (сканирует создатель слота)
+  startConfirmedAt DateTime?
+  startConfirmedById String?
+  startConfirmedBy   User? @relation("BookingStartConfirmedBy", fields: [startConfirmedById], references: [id])
+  startLat Float?
+  startLng Float?
+
+  // ✅ Подтверждение окончания смены (понадобится дальше)
+  endConfirmedAt DateTime?
+  endConfirmedById String?
+  endConfirmedBy   User? @relation("BookingEndConfirmedBy", fields: [endConfirmedById], references: [id])
+  endLat Float?
+  endLng Float?
+
   @@index([userId, status])
   @@index([slotId])
+  @@index([startConfirmedById])
+  @@index([endConfirmedById])
+}
+
+// ✅ Геопинги исполнителя при показе QR (lat/lng берём с устройства исполнителя)
+model UserGeoPing {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  lat Float
+  lng Float
+
+  @@index([userId, createdAt])
 }
 
 model Feedback {
@@ -177,6 +230,10 @@ enum BookingStatus {
   cancelled
   completed
   checkin_requested
+
+  // ✅ дополнительно под подтверждение начала/конца
+  started
+  ended
 }
 
 enum ReputationEventType {

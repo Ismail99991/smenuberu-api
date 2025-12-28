@@ -37,6 +37,39 @@ function randomState() {
   return crypto.randomBytes(16).toString("hex");
 }
 
+function randomPerformerQrToken() {
+  // Stable, unique token for user's personal QR
+  return crypto.randomBytes(24).toString("hex");
+}
+
+async function ensurePerformerQrToken(prisma: any, userId: string) {
+  // Генерируем QR-токен один раз. Если уже есть — ничего не делаем.
+  const existing = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { performerQrToken: true }
+  });
+  if (existing?.performerQrToken) return existing.performerQrToken;
+
+  // На случай коллизии уникального индекса — несколько попыток
+  for (let i = 0; i < 5; i++) {
+    const token = randomPerformerQrToken();
+    try {
+      const updated = await prisma.user.update({
+        where: { id: userId },
+        data: { performerQrToken: token },
+        select: { performerQrToken: true }
+      });
+      return updated.performerQrToken;
+    } catch (e: any) {
+      // Prisma unique constraint: P2002
+      if (String(e?.code ?? "") === "P2002") continue;
+      throw e;
+    }
+  }
+
+  throw new Error("failed to generate unique performerQrToken");
+}
+
 function yandexAuthorizeUrl(args: { clientId: string; redirectUri: string; state: string }) {
   const u = new URL("https://oauth.yandex.com/authorize");
   u.searchParams.set("response_type", "code");
@@ -168,6 +201,35 @@ function flowConfig(kind: FlowKind) {
 }
 
 export async function authRoutes(app: FastifyInstance) {
+  // Один раз заполнить performerQrToken для уже существующих пользователей.
+  // Защита: нужен секрет в ENV и тот же секрет в query ?key=
+  // Ничего не ломает, если секрет не задан — просто запрещает вызов.
+  app.post("/qr/backfill", async (req, reply) => {
+    const key = typeof (req.query as any)?.key === "string" ? String((req.query as any).key) : "";
+    const secret = process.env.QR_BACKFILL_SECRET ?? "";
+    if (!secret || key !== secret) return reply.code(403).send({ ok: false, error: "forbidden" });
+
+    const limitRaw = typeof (req.query as any)?.limit === "string" ? String((req.query as any).limit) : "";
+    const limit = Math.max(1, Math.min(1000, Number(limitRaw || 200)));
+
+    // @ts-expect-error prisma is decorated in server.ts
+    const prisma = app.prisma;
+
+    const users = await prisma.user.findMany({
+      where: { performerQrToken: null },
+      select: { id: true },
+      take: limit
+    });
+
+    let updated = 0;
+    for (const u of users) {
+      await ensurePerformerQrToken(prisma, u.id);
+      updated++;
+    }
+
+    return reply.send({ ok: true, updated });
+  });
+
   async function startFlow(kind: FlowKind, req: any, reply: any) {
     const cfg = flowConfig(kind);
     if (!cfg.clientId || !cfg.clientSecret) {
@@ -281,8 +343,14 @@ export async function authRoutes(app: FastifyInstance) {
         where: { yandexId },
         update: { yandexLogin, displayName, email, avatarUrl },
         create: { yandexId, yandexLogin, displayName, email, avatarUrl },
-        select: { id: true }
+        select: { id: true, performerQrToken: true }
       });
+
+      // ✅ Персональный QR токен должен быть у каждого исполнителя.
+      // Генерируем при первой регистрации и догоним уже существующих пользователей.
+      if (!user.performerQrToken) {
+        await ensurePerformerQrToken(prisma, user.id);
+      }
 
       stage = "db_create_session";
       const rawSessionToken = randomToken();
@@ -382,6 +450,7 @@ export async function authRoutes(app: FastifyInstance) {
             yandexLogin: true,
             email: true,
             avatarUrl: true,
+            performerQrToken: true,
             createdAt: true
           }
         }
@@ -396,37 +465,5 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ ok: true, user: session.user });
-  });
-
-  /**
-   * POST /auth/logout
-   */
-  app.post("/logout", async (req, reply) => {
-    const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
-    const domain = cookieDomainForReq(req);
-
-    if (!sessionToken) {
-      reply.clearCookie(cookieName(), {
-        path: "/",
-        secure: true,
-        sameSite: "lax",
-        ...(domain ? { domain } : {})
-      });
-      return reply.send({ ok: true });
-    }
-
-    const tokenHash = sha256Hex(String(sessionToken));
-
-    // @ts-expect-error prisma is decorated in server.ts
-    const prisma = app.prisma;
-
-    await prisma.session.deleteMany({ where: { tokenHash } }).catch(() => {});
-    reply.clearCookie(cookieName(), {
-      path: "/",
-      secure: true,
-      sameSite: "lax",
-      ...(domain ? { domain } : {})
-    });
-    return reply.send({ ok: true });
   });
 }

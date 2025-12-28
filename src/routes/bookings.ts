@@ -42,11 +42,27 @@ function unauthorized(reply: any) {
   return reply.code(401).send({ ok: false, error: "Unauthorized" });
 }
 
-// ---- routes ----
+function haversineMeters(aLat: number, aLng: number, bLat: number, bLng: number) {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const lat1 = toRad(aLat);
+  const lat2 = toRad(bLat);
+
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * (Math.sin(dLng / 2) ** 2);
+
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+const PING_MAX_AGE_MS = 2 * 60 * 1000; // свежесть геопинга исполнителя
+
 export const bookingsRoutes: FastifyPluginAsync = async (app) => {
   /**
    * GET /bookings/state
-   * Возвращает map slotId -> status для текущего пользователя
+   * -> mapping slotId -> status
    */
   app.get("/state", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -69,7 +85,6 @@ export const bookingsRoutes: FastifyPluginAsync = async (app) => {
   /**
    * POST /bookings
    * Body: { slotId }
-   * Создаёт booking для текущего пользователя (userId берём из cookie-сессии)
    */
   app.post("/", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -87,39 +102,17 @@ export const bookingsRoutes: FastifyPluginAsync = async (app) => {
         date: true,
         startTime: true,
         endTime: true,
-        startsAt: true,
-        endsAt: true,
       },
     });
 
-    if (!slot) {
-      return reply.code(404).send({ ok: false, error: "Slot not found" });
-    }
+    if (!slot) return reply.code(404).send({ ok: false, error: "Slot not found" });
 
-    // Проверка конфликта по времени (поддерживаем обе схемы: date/startTime/endTime или startsAt/endsAt)
-    const overlap = await prisma.booking.findFirst({
-      where: {
-        userId,
-        status: "booked",
-        slot: slot.startsAt && slot.endsAt
-          ? {
-              // datetime variant
-              startsAt: { lt: slot.endsAt },
-              endsAt: { gt: slot.startsAt },
-            }
-          : {
-              // date + time variant
-              date: slot.date,
-              startTime: { lt: slot.endTime },
-              endTime: { gt: slot.startTime },
-            },
-      },
+    const existing = await prisma.booking.findFirst({
+      where: { userId, slotId: body.slotId, status: "booked" },
       select: { id: true },
     });
 
-    if (overlap) {
-      return reply.code(409).send({ ok: false, error: "Time conflict" });
-    }
+    if (existing) return reply.code(400).send({ ok: false, error: "Already booked" });
 
     const booking = await prisma.booking.create({
       data: {
@@ -127,7 +120,6 @@ export const bookingsRoutes: FastifyPluginAsync = async (app) => {
         slotId: body.slotId,
         status: "booked",
       },
-      include: { slot: { include: { object: true } } },
     });
 
     return reply.send({ ok: true, booking });
@@ -136,7 +128,6 @@ export const bookingsRoutes: FastifyPluginAsync = async (app) => {
   /**
    * POST /bookings/cancel
    * Body: { slotId }
-   * Отменяет активную booking текущего пользователя
    */
   app.post("/cancel", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -160,24 +151,22 @@ export const bookingsRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ ok: false, error: "Active booking not found" });
     }
 
-    const updated = await prisma.booking.update({
+    await prisma.booking.update({
       where: { id: booking.id },
       data: { status: "cancelled" },
-      include: { slot: { include: { object: true } } },
     });
 
-    return reply.send({ ok: true, booking: updated });
+    return reply.send({ ok: true });
   });
 
   /**
-   * GET /bookings?status=booked|cancelled|...
-   * (оставлено для совместимости; возвращает брони ТЕКУЩЕГО пользователя)
+   * GET /bookings/list?status=...
    */
-  app.get("/", async (req, reply) => {
+  app.get("/list", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
     if (!userId) return unauthorized(reply);
 
-    const { status } = z.object({ status: z.string().optional() }).parse(req.query);
+    const status = typeof (req.query as any)?.status === "string" ? String((req.query as any).status) : null;
 
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
@@ -192,5 +181,211 @@ export const bookingsRoutes: FastifyPluginAsync = async (app) => {
     });
 
     return reply.send({ ok: true, bookings });
+  });
+
+  /**
+   * ✅ НОВОЕ: POST /bookings/confirm-start
+   * Старший смены сканирует QR исполнителя и подтверждает начало смены.
+   * Body: { slotId, qrToken }
+   */
+  app.post("/confirm-start", async (req, reply) => {
+    const seniorId = await getUserIdFromSession(app, req);
+    if (!seniorId) return unauthorized(reply);
+
+    const body = z
+      .object({
+        slotId: z.string().min(1),
+        qrToken: z.string().min(1),
+      })
+      .parse(req.body);
+
+    // @ts-expect-error prisma is decorated in server.ts
+    const prisma = app.prisma;
+
+    const performer = await prisma.user.findUnique({
+      where: { performerQrToken: body.qrToken },
+      select: { id: true },
+    });
+
+    if (!performer) return reply.code(404).send({ ok: false, error: "Performer not found by qrToken" });
+
+    const booking = await prisma.booking.findFirst({
+      where: {
+        slotId: body.slotId,
+        userId: performer.id,
+        status: { in: ["booked", "checkin_requested"] },
+        startConfirmedAt: null,
+      },
+      select: {
+        id: true,
+        status: true,
+        slot: {
+          select: {
+            id: true,
+            createdById: true,
+            startTime: true,
+            endTime: true,
+            object: { select: { lat: true, lng: true } },
+          },
+        },
+      },
+    });
+
+    if (!booking) return reply.code(404).send({ ok: false, error: "Booking not found" });
+
+    if (booking.slot.createdById !== seniorId) {
+      return reply.code(403).send({ ok: false, error: "Only slot creator can confirm" });
+    }
+
+    const now = new Date();
+
+    // окно старта: не раньше чем за 15 минут до планового старта
+    const startWindow = new Date(booking.slot.startTime.getTime() - 15 * 60 * 1000);
+    if (now.getTime() < startWindow.getTime()) {
+      return reply.code(400).send({ ok: false, error: "too early" });
+    }
+
+    // берём самый свежий геопинг исполнителя
+    const ping = await prisma.userGeoPing.findFirst({
+      where: {
+        userId: performer.id,
+        createdAt: { gte: new Date(now.getTime() - PING_MAX_AGE_MS) },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { lat: true, lng: true, createdAt: true },
+    });
+
+    if (!ping) {
+      return reply.code(400).send({ ok: false, error: "no fresh geo ping from performer" });
+    }
+
+    // геопроверка 200м по координатам объекта
+    const oLat = booking.slot.object?.lat ?? null;
+    const oLng = booking.slot.object?.lng ?? null;
+    if (Number.isFinite(oLat) && Number.isFinite(oLng)) {
+      const distM = haversineMeters(ping.lat, ping.lng, oLat, oLng);
+      if (distM > 200) {
+        return reply.code(400).send({ ok: false, error: "too far from object", distanceM: Math.round(distM) });
+      }
+    }
+
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: {
+        status: "started",
+
+        // факт прибытия
+        startsAt: now,
+
+        startConfirmedAt: now,
+        startConfirmedById: seniorId,
+        startLat: ping.lat,
+        startLng: ping.lng,
+      },
+    });
+
+    return reply.send({ ok: true });
+  });
+
+  /**
+   * ✅ НОВОЕ: POST /bookings/confirm-end
+   * Подтверждение окончания смены (по твоему окну до 4 часов после планового endTime).
+   * Body: { slotId, qrToken }
+   */
+  app.post("/confirm-end", async (req, reply) => {
+    const seniorId = await getUserIdFromSession(app, req);
+    if (!seniorId) return unauthorized(reply);
+
+    const body = z
+      .object({
+        slotId: z.string().min(1),
+        qrToken: z.string().min(1),
+      })
+      .parse(req.body);
+
+    // @ts-expect-error prisma is decorated in server.ts
+    const prisma = app.prisma;
+
+    const performer = await prisma.user.findUnique({
+      where: { performerQrToken: body.qrToken },
+      select: { id: true },
+    });
+
+    if (!performer) return reply.code(404).send({ ok: false, error: "Performer not found by qrToken" });
+
+    const booking = await prisma.booking.findFirst({
+      where: {
+        slotId: body.slotId,
+        userId: performer.id,
+        status: { in: ["started", "booked", "checkin_requested"] },
+        endConfirmedAt: null,
+      },
+      select: {
+        id: true,
+        slot: {
+          select: {
+            id: true,
+            createdById: true,
+            endTime: true,
+            object: { select: { lat: true, lng: true } },
+          },
+        },
+      },
+    });
+
+    if (!booking) return reply.code(404).send({ ok: false, error: "Booking not found" });
+
+    if (booking.slot.createdById !== seniorId) {
+      return reply.code(403).send({ ok: false, error: "Only slot creator can confirm" });
+    }
+
+    const now = new Date();
+
+    // окно окончания: до 4 часов после планового конца смены
+    const endDeadline = new Date(booking.slot.endTime.getTime() + 4 * 60 * 60 * 1000);
+    if (now.getTime() > endDeadline.getTime()) {
+      return reply.code(400).send({ ok: false, error: "too late to confirm end" });
+    }
+
+    // свежий геопинг исполнителя
+    const ping = await prisma.userGeoPing.findFirst({
+      where: {
+        userId: performer.id,
+        createdAt: { gte: new Date(now.getTime() - PING_MAX_AGE_MS) },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { lat: true, lng: true, createdAt: true },
+    });
+
+    if (!ping) {
+      return reply.code(400).send({ ok: false, error: "no fresh geo ping from performer" });
+    }
+
+    // геопроверка 200м
+    const oLat = booking.slot.object?.lat ?? null;
+    const oLng = booking.slot.object?.lng ?? null;
+    if (Number.isFinite(oLat) && Number.isFinite(oLng)) {
+      const distM = haversineMeters(ping.lat, ping.lng, oLat, oLng);
+      if (distM > 200) {
+        return reply.code(400).send({ ok: false, error: "too far from object", distanceM: Math.round(distM) });
+      }
+    }
+
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: {
+        status: "ended",
+
+        // факт убытия
+        endsAt: now,
+
+        endConfirmedAt: now,
+        endConfirmedById: seniorId,
+        endLat: ping.lat,
+        endLng: ping.lng,
+      },
+    });
+
+    return reply.send({ ok: true });
   });
 };

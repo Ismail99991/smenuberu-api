@@ -16,30 +16,8 @@ function fmtTimeUTC(dt: Date) {
   return `${pad2(dt.getUTCHours())}:${pad2(dt.getUTCMinutes())}`;
 }
 
-function parseISODate(iso: string) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  if (!m) return null;
-  return { y: +m[1], mo: +m[2], d: +m[3] };
-}
-
-function parseTimeHHMM(t: string) {
-  const m = /^(\d{2}):(\d{2})$/.exec(t);
-  if (!m) return null;
-  const hh = +m[1];
-  const mm = +m[2];
-  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
-  return { hh, mm };
-}
-
-function toUtcDateTime(date: string, hhmm: string): Date | null {
-  const d = parseISODate(date);
-  const t = parseTimeHHMM(hhmm);
-  if (!d || !t) return null;
-  return new Date(Date.UTC(d.y, d.mo - 1, d.d, t.hh, t.mm, 0));
-}
-
 /**
- * ✅ GEO: расстояние между двумя координатами (метры)
+ * Расстояние между координатами (метры)
  */
 function haversineMeters(aLat: number, aLng: number, bLat: number, bLng: number) {
   const R = 6371000;
@@ -102,79 +80,107 @@ export async function slotsRoutes(app: FastifyInstance) {
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 
-    const rows = await prisma.slot.findMany({
-      orderBy: [{ date: "desc" }, { startTime: "asc" }],
+    const list = await prisma.slot.findMany({
       include: { object: true },
-    });
-
-    return rows.map((s: any) => ({
-      id: s.id,
-      date: fmtISODateUTC(s.date),
-      title: s.title,
-      company: s.object?.name ?? "",
-      city: s.object?.city ?? "",
-      address: s.object?.address ?? "",
-      time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
-      pay: s.pay,
-      hot: s.hot,
-      type: s.type,
-    }));
-  });
-
-  /**
-   * GET /slots/ui
-   */
-  app.get("/ui", async () => {
-    // @ts-expect-error prisma is decorated in server.ts
-    const prisma = app.prisma;
-
-    const rows = await prisma.slot.findMany({
       orderBy: [{ date: "asc" }, { startTime: "asc" }],
-      include: { object: true },
     });
 
-    return rows.map((s: any) => ({
-      id: s.id,
-      date: fmtISODateUTC(s.date),
-      title: s.title,
-      company: s.object?.name ?? "",
-      city: s.object?.city ?? "",
-      address: s.object?.address ?? "",
-      time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
-      pay: s.pay,
-      hot: s.hot,
-      tags: [],
-      type: s.type,
-    }));
+    return {
+      ok: true,
+      slots: list.map((s: any) => ({
+        id: s.id,
+        objectId: s.objectId,
+        title: s.title,
+        date: fmtISODateUTC(s.date),
+        startTime: fmtTimeUTC(s.startTime),
+        endTime: fmtTimeUTC(s.endTime),
+        city: s.object?.city ?? "",
+        address: s.object?.address ?? "",
+        time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
+        pay: s.pay,
+        hot: s.hot,
+        type: s.type,
+      })),
+    };
   });
 
   /**
-   * GET /slots/:id
+   * ✅ НОВОЕ: GET /slots/created
+   * Слоты, созданные текущим пользователем (заказчик/старший смены).
+   * Нужно для client-приложения: страница управления сменами.
    */
-  app.get("/:id", async (req, reply) => {
+  app.get("/created", async (req, reply) => {
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+
     // @ts-expect-error prisma is decorated in server.ts
     const prisma = app.prisma;
 
-    const { id } = req.params as any;
+    const list = await prisma.slot.findMany({
+      where: { createdById: userId },
+      orderBy: [{ date: "desc" }, { startTime: "desc" }],
+      select: {
+        id: true,
+        title: true,
+        date: true,
+        startTime: true,
+        endTime: true,
+        pay: true,
+        hot: true,
+        type: true,
+        object: {
+          select: {
+            id: true,
+            name: true,
+            city: true,
+            address: true,
+            lat: true,
+            lng: true,
+          },
+        },
+        bookings: {
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
 
-    const s = await prisma.slot.findUnique({
-      where: { id },
-      include: { object: true },
+            // ФАКТ (реальное время прихода/ухода исполнителя)
+            startsAt: true,
+            endsAt: true,
+
+            // подтверждения
+            startConfirmedAt: true,
+            startConfirmedById: true,
+            endConfirmedAt: true,
+            endConfirmedById: true,
+
+            user: {
+              select: {
+                id: true,
+                displayName: true,
+                avatarUrl: true,
+              },
+            },
+          },
+        },
+      },
     });
-
-    if (!s) return reply.code(404).send({ ok: false, error: "not found" });
 
     return reply.send({
-      id: s.id,
-      date: fmtISODateUTC(s.date),
-      title: s.title,
-      company: s.object?.name ?? "",
-      city: s.object?.city ?? "",
-      address: s.object?.address ?? "",
-      time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
-      pay: s.pay,
-      hot: s.hot,
-      type: s.type,
+      ok: true,
+      slots: list.map((s: any) => ({
+        id: s.id,
+        title: s.title,
+        date: s.date,
+        startTime: s.startTime, // ПЛАН
+        endTime: s.endTime,     // ПЛАН
+        pay: s.pay,
+        hot: s.hot,
+        type: s.type,
+        object: s.object,
+        bookings: s.bookings,
+      })),
     });
   });
 
@@ -200,40 +206,27 @@ export async function slotsRoutes(app: FastifyInstance) {
     if (!objectId || !title || !dateStr || !startStr || !endStr || !Number.isFinite(payNum) || !type) {
       return reply.code(400).send({
         ok: false,
-        error: "invalid payload",
-        example: {
-          objectId: "Object.id",
-          title: "string",
-          date: "YYYY-MM-DD",
-          startTime: "HH:MM",
-          endTime: "HH:MM",
-          pay: 3500,
-          type: "loader",
-          hot: false,
-        },
+        error: "Missing fields: objectId,title,date,startTime,endTime,pay,type",
       });
     }
 
-    const date = toUtcDateTime(dateStr, "00:00");
-    const startTime = toUtcDateTime(dateStr, startStr);
-    const endTime = toUtcDateTime(dateStr, endStr);
+    // ✅ важно: createdById (кто создал смену)
+    const userId = await getUserIdFromSession(app, req);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
 
-    if (!date || !startTime || !endTime) {
-      return reply.code(400).send({ ok: false, error: "invalid date/startTime/endTime" });
+    const [y, m, d] = dateStr.split("-").map((x) => Number(x));
+    const [sh, sm] = startStr.split(":").map((x) => Number(x));
+    const [eh, em] = endStr.split(":").map((x) => Number(x));
+
+    if (![y, m, d, sh, sm, eh, em].every((n) => Number.isFinite(n))) {
+      return reply.code(400).send({ ok: false, error: "Bad date/time format" });
     }
 
-    if (endTime.getTime() <= startTime.getTime()) {
-      return reply.code(400).send({ ok: false, error: "endTime must be after startTime" });
-    }
+    const date = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+    const startTime = new Date(Date.UTC(y, m - 1, d, sh, sm, 0));
+    const endTime = new Date(Date.UTC(y, m - 1, d, eh, em, 0));
 
-    const obj = await prisma.object.findUnique({
-      where: { id: objectId },
-      select: { id: true },
-    });
-
-    if (!obj) return reply.code(400).send({ ok: false, error: "object not found" });
-
-    const created = await prisma.slot.create({
+    const slot = await prisma.slot.create({
       data: {
         objectId,
         title,
@@ -243,24 +236,17 @@ export async function slotsRoutes(app: FastifyInstance) {
         pay: Math.round(payNum),
         type,
         hot,
+        createdById: userId,
       },
     });
 
-    return reply.code(201).send(created);
+    return reply.send({ ok: true, slot });
   });
 
   /**
-   * ✅ MVP: "Начать смену"
    * POST /slots/:id/start
-   *
-   * Текущая минимальная логика:
-   * - пользователь должен быть авторизован
-   * - слот должен быть забронирован им (booking.status === "booked")
-   * - если у объекта есть lat/lng: проверяем дистанцию <= 120м
-   * - не раньше чем за 15 минут до startTime
-   * - переводим booking.status => "checkin_requested"
-   *
-   * ВАЖНО: это "первый шаг". Дальше добавим confirm-start от owner.
+   * Исполнитель “пришёл на смену” → отправляет lat/lng и просит чек-ин.
+   * (QR покажет параллельно, а подтверждение будет у старшего через /bookings/confirm-start)
    */
   app.post("/:id/start", async (req, reply) => {
     const userId = await getUserIdFromSession(app, req);
@@ -290,24 +276,29 @@ export async function slotsRoutes(app: FastifyInstance) {
     const booking = (slot.bookings ?? []).find((b: any) => b.userId === userId && b.status === "booked");
     if (!booking) return reply.code(403).send({ ok: false, error: "not your booked slot" });
 
-    // Проверка времени: не раньше чем за 15 минут до старта
+    // Временное окно: не раньше чем за 15 минут до планового старта
     const now = new Date();
-    const earliest = new Date(slot.startTime.getTime() - 15 * 60000);
-    if (now.getTime() < earliest.getTime()) {
+    const startWindow = new Date(slot.startTime.getTime() - 15 * 60 * 1000);
+    if (now.getTime() < startWindow.getTime()) {
       return reply.code(400).send({ ok: false, error: "too early" });
     }
 
-    // Проверка гео: если у объекта есть координаты
-    const oLat = slot.object?.lat;
-    const oLng = slot.object?.lng;
-    if (oLat != null && oLng != null) {
+    // Геопроверка (200м) — по координатам объекта
+    const oLat = slot.object?.lat ?? null;
+    const oLng = slot.object?.lng ?? null;
+    if (Number.isFinite(oLat) && Number.isFinite(oLng)) {
       const distM = haversineMeters(lat, lng, oLat, oLng);
-      if (distM > 120) {
+      if (distM > 200) {
         return reply.code(400).send({ ok: false, error: "too far from object", distanceM: Math.round(distM) });
       }
     }
 
-    // Переводим бронь в checkin_requested
+    // ✅ сохраняем геопинг исполнителя (для последующего подтверждения QR-сканом)
+    await prisma.userGeoPing.create({
+      data: { userId, lat, lng },
+    });
+
+    // Переводим бронь в checkin_requested (как у тебя было)
     await prisma.booking.update({
       where: { id: booking.id },
       data: { status: "checkin_requested" },
