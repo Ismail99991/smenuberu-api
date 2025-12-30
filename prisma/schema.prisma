@@ -116,6 +116,7 @@ model Slot {
   pay   Int
   type  TaskType
   hot   Boolean  @default(false)
+  published Boolean @default(false)
 
   bookings  Booking[]
   feedbacks Feedback[]
