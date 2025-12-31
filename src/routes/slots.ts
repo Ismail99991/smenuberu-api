@@ -193,7 +193,8 @@ export async function slotsRoutes(app: FastifyInstance) {
    *   - web (исполнители): для просмотра и бронирования
    */
   app.get("/:id", async (req, reply) => {
-    // 1. Авторизация (может быть null для публичного просмотра)
+   console.log("DEBUG slotId in API:", req.params);
+    // 1. Получаем userId (если авторизован)
     const userId = await getUserIdFromSession(app, req);
     
     // 2. Получаем ID
