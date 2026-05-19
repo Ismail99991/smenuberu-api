@@ -10,33 +10,65 @@ const fastify_1 = __importDefault(require("fastify"));
 const cookie_1 = __importDefault(require("@fastify/cookie"));
 const cors_1 = __importDefault(require("@fastify/cors"));
 const prisma_1 = require("./prisma");
+const bookings_me_1 = require("./routes/bookings-me");
 const slots_1 = require("./routes/slots");
 const bookings_1 = require("./routes/bookings");
 const objects_1 = require("./routes/objects");
 const auth_1 = require("./routes/auth");
+const uploads_1 = require("./routes/uploads");
+const geo_1 = require("./routes/geo");
+const dashboard_1 = require("./routes/dashboard");
+function isAllowedOrigin(origin) {
+    // allow localhost
+    if (origin === "http://localhost:3000")
+        return true;
+    // allow vercel previews
+    if (origin.endsWith(".vercel.app"))
+        return true;
+    // allow any smenube.ru subdomain (and root)
+    try {
+        const u = new URL(origin);
+        const h = u.hostname;
+        if (h === "smenube.ru" || h.endsWith(".smenube.ru"))
+            return true;
+    }
+    catch {
+        // ignore parse errors
+    }
+    // explicit allowlist (fallback)
+    const allowlist = new Set([
+        "https://smenube.ru",
+        "https://www.smenube.ru",
+        "https://client.smenube.ru",
+        "https://dashboard.smenube.ru",
+    ]);
+    return allowlist.has(origin);
+}
 function buildApp() {
     const app = (0, fastify_1.default)({
         logger: true
     });
     app.decorate("prisma", prisma_1.prisma);
     app.register(cookie_1.default);
-    // ✅ CORS для smenube.ru + куки
+    app.register(dashboard_1.dashboardRoutes);
+    // ✅ CORS + preflight
     app.register(cors_1.default, {
         origin: (origin, cb) => {
-            const allowlist = [
-                "https://smenube.ru",
-                "http://localhost:3000",
-                "https://www.smenube.ru",
-            ];
             // запросы без Origin (curl/postman/server-to-server) — разрешаем
             if (!origin)
                 return cb(null, true);
-            if (allowlist.includes(origin))
+            if (isAllowedOrigin(origin))
                 return cb(null, true);
             return cb(new Error("Not allowed by CORS"), false);
         },
-        credentials: true
+        credentials: true,
+        methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+        // важно для некоторых окружений/проксей
+        preflightContinue: false,
+        optionsSuccessStatus: 204,
     });
+    // на всякий случай: health
     app.get("/health", async () => {
         return {
             ok: true,
@@ -49,6 +81,9 @@ function buildApp() {
     app.register(objects_1.objectsRoutes, { prefix: "/objects" });
     app.register(slots_1.slotsRoutes, { prefix: "/slots" });
     app.register(bookings_1.bookingsRoutes, { prefix: "/bookings" });
+    app.register(bookings_me_1.bookingsMeRoutes, { prefix: "/bookings" });
+    app.register(uploads_1.uploadsRoutes, { prefix: "/uploads" });
+    app.register(geo_1.geoRoutes, { prefix: "/geo" });
     app.addHook("onClose", async () => {
         await prisma_1.prisma.$disconnect();
     });

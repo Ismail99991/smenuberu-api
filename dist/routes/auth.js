@@ -5,11 +5,20 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.authRoutes = authRoutes;
 const crypto_1 = __importDefault(require("crypto"));
-function baseUrlFromEnv() {
-    return process.env.API_BASE_URL ?? "https://smenuberu-api.onrender.com";
+function normalizeBaseUrl(u) {
+    return String(u).replace(/\/+$/, "");
 }
-function webUrlFromEnv() {
-    return process.env.WEB_URL ?? "http://localhost:3000";
+function baseUrlFromEnv() {
+    return normalizeBaseUrl(process.env.API_BASE_URL ?? "https://api.smenube.ru");
+}
+function webUrlFromEnvDefault() {
+    return normalizeBaseUrl(process.env.WEB_URL ?? "https://www.smenube.ru");
+}
+function clientWebUrlFromEnv() {
+    return normalizeBaseUrl(process.env.CLIENT_WEB_URL ?? "https://client.smenube.ru");
+}
+function webWebUrlFromEnv() {
+    return normalizeBaseUrl(process.env.WEB_WEB_URL ?? webUrlFromEnvDefault());
 }
 function cookieName() {
     return process.env.AUTH_COOKIE_NAME ?? "smenuberu_session";
@@ -22,6 +31,38 @@ function randomToken() {
 }
 function randomState() {
     return crypto_1.default.randomBytes(16).toString("hex");
+}
+function randomPerformerQrToken() {
+    // Stable, unique token for user's personal QR
+    return crypto_1.default.randomBytes(24).toString("hex");
+}
+async function ensurePerformerQrToken(prisma, userId) {
+    // Генерируем QR-токен один раз. Если уже есть — ничего не делаем.
+    const existing = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { performerQrToken: true }
+    });
+    if (existing?.performerQrToken)
+        return existing.performerQrToken;
+    // На случай коллизии уникального индекса — несколько попыток
+    for (let i = 0; i < 5; i++) {
+        const token = randomPerformerQrToken();
+        try {
+            const updated = await prisma.user.update({
+                where: { id: userId },
+                data: { performerQrToken: token },
+                select: { performerQrToken: true }
+            });
+            return updated.performerQrToken;
+        }
+        catch (e) {
+            // Prisma unique constraint: P2002
+            if (String(e?.code ?? "") === "P2002")
+                continue;
+            throw e;
+        }
+    }
+    throw new Error("failed to generate unique performerQrToken");
 }
 function yandexAuthorizeUrl(args) {
     const u = new URL("https://oauth.yandex.com/authorize");
@@ -54,9 +95,7 @@ async function fetchYandexUserInfo(accessToken) {
     u.searchParams.set("format", "json");
     const res = await fetch(u.toString(), {
         method: "GET",
-        headers: {
-            Authorization: `OAuth ${accessToken}`
-        }
+        headers: { Authorization: `OAuth ${accessToken}` }
     });
     if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -69,31 +108,107 @@ function avatarUrlFromYandex(default_avatar_id) {
         return null;
     return `https://avatars.yandex.net/get-yapic/${default_avatar_id}/islands-200`;
 }
+/**
+ * Для прод-куки на поддоменах нужно Domain=.smenube.ru
+ * На localhost домен ставить нельзя.
+ */
+function cookieDomainForReq(req) {
+    const host = String(req?.headers?.host ?? "");
+    if (host.includes("localhost") || host.includes("127.0.0.1"))
+        return undefined;
+    return ".smenube.ru";
+}
+function readNext(req, fallback) {
+    const n = typeof req.query?.next === "string" ? String(req.query.next) : "";
+    const safe = n.startsWith("/") ? n : fallback;
+    return safe;
+}
+function setNextCookie(reply, next) {
+    reply.setCookie("yandex_oauth_next", next, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: true,
+        path: "/",
+        maxAge: 10 * 60
+    });
+}
+function takeNextCookie(req, reply, fallback) {
+    const next = req.cookies?.yandex_oauth_next ?? fallback;
+    reply.clearCookie("yandex_oauth_next", { path: "/" });
+    return typeof next === "string" && next.startsWith("/") ? next : fallback;
+}
+function flowConfig(kind) {
+    // Разные приложения/доступы:
+    // - YANDEX_CLIENT_ID_CLIENT / _SECRET_CLIENT
+    // - YANDEX_CLIENT_ID_WEB / _SECRET_WEB
+    if (kind === "client") {
+        const clientId = process.env.YANDEX_CLIENT_ID_CLIENT ?? "";
+        const clientSecret = process.env.YANDEX_CLIENT_SECRET_CLIENT ?? "";
+        const redirectUri = `${baseUrlFromEnv()}/auth/yandex/client/callback`;
+        const webUrl = clientWebUrlFromEnv();
+        const provider = "yandex_client";
+        return { clientId, clientSecret, redirectUri, webUrl, provider };
+    }
+    if (kind === "web") {
+        const clientId = process.env.YANDEX_CLIENT_ID_WEB ?? "";
+        const clientSecret = process.env.YANDEX_CLIENT_SECRET_WEB ?? "";
+        const redirectUri = `${baseUrlFromEnv()}/auth/yandex/web/callback`;
+        const webUrl = webWebUrlFromEnv();
+        const provider = "yandex_web";
+        return { clientId, clientSecret, redirectUri, webUrl, provider };
+    }
+    // legacy/back-compat
+    const clientId = process.env.YANDEX_CLIENT_ID ?? "";
+    const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
+    const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
+    const webUrl = webUrlFromEnvDefault();
+    const provider = "yandex";
+    return { clientId, clientSecret, redirectUri, webUrl, provider };
+}
 async function authRoutes(app) {
-    /**
-     * GET /auth/yandex/start
-     */
-    app.get("/yandex/start", async (_req, reply) => {
-        const clientId = process.env.YANDEX_CLIENT_ID ?? "";
-        const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
-        if (!clientId || !clientSecret) {
-            return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set" });
+    // Один раз заполнить performerQrToken для уже существующих пользователей.
+    // Защита: нужен секрет в ENV и тот же секрет в query ?key=
+    // Ничего не ломает, если секрет не задан — просто запрещает вызов.
+    app.post("/qr/backfill", async (req, reply) => {
+        const key = typeof req.query?.key === "string" ? String(req.query.key) : "";
+        const secret = process.env.QR_BACKFILL_SECRET ?? "";
+        if (!secret || key !== secret)
+            return reply.code(403).send({ ok: false, error: "forbidden" });
+        const limitRaw = typeof req.query?.limit === "string" ? String(req.query.limit) : "";
+        const limit = Math.max(1, Math.min(1000, Number(limitRaw || 200)));
+        // @ts-expect-error prisma is decorated in server.ts
+        const prisma = app.prisma;
+        const users = await prisma.user.findMany({
+            where: { performerQrToken: null },
+            select: { id: true },
+            take: limit
+        });
+        let updated = 0;
+        for (const u of users) {
+            await ensurePerformerQrToken(prisma, u.id);
+            updated++;
+        }
+        return reply.send({ ok: true, updated });
+    });
+    async function startFlow(kind, req, reply) {
+        const cfg = flowConfig(kind);
+        if (!cfg.clientId || !cfg.clientSecret) {
+            return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set for flow", flow: kind });
         }
         // @ts-expect-error prisma is decorated in server.ts
         const prisma = app.prisma;
         const state = randomState();
-        const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
         // state живёт 10 минут
         const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
         // ✅ сохраняем в БД (основной источник правды)
         await prisma.oAuthState.create({
             data: {
-                provider: "yandex",
+                provider: cfg.provider,
                 state,
                 expiresAt
             }
         });
-        // ✅ + дублируем в cookie как fallback (если БД/окружение внезапно не совпадёт)
+        // ✅ state cookie fallback
         reply.setCookie("yandex_oauth_state", state, {
             httpOnly: true,
             sameSite: "lax",
@@ -101,19 +216,20 @@ async function authRoutes(app) {
             path: "/",
             maxAge: 10 * 60
         });
-        const url = yandexAuthorizeUrl({ clientId, redirectUri, state });
+        // ✅ next cookie (куда вернуться после callback)
+        // дефолт для flow:
+        const fallbackNext = kind === "client" ? "/profile" : "/me";
+        const next = readNext(req, fallbackNext);
+        setNextCookie(reply, next);
+        const url = yandexAuthorizeUrl({ clientId: cfg.clientId, redirectUri: cfg.redirectUri, state });
         return reply.redirect(url);
-    });
-    /**
-     * GET /auth/yandex/callback
-     */
-    app.get("/yandex/callback", async (req, reply) => {
+    }
+    async function callbackFlow(kind, req, reply) {
         let stage = "init";
         try {
-            const clientId = process.env.YANDEX_CLIENT_ID ?? "";
-            const clientSecret = process.env.YANDEX_CLIENT_SECRET ?? "";
-            if (!clientId || !clientSecret) {
-                return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set" });
+            const cfg = flowConfig(kind);
+            if (!cfg.clientId || !cfg.clientSecret) {
+                return reply.code(500).send({ ok: false, error: "YANDEX_CLIENT_ID/SECRET not set for flow", flow: kind });
             }
             const code = typeof req.query?.code === "string" ? String(req.query.code) : "";
             const state = typeof req.query?.state === "string" ? String(req.query.state) : "";
@@ -127,9 +243,9 @@ async function authRoutes(app) {
                 select: { expiresAt: true, provider: true }
             });
             const cookieState = req.cookies?.yandex_oauth_state ?? "";
-            // ✅ 1) основной путь — через БД
-            // ✅ 2) fallback — через cookie (если БД не совпала/не записалась/и т.п.)
-            if (!row || row.provider !== "yandex") {
+            // ✅ 1) основной путь — через БД (provider совпадает)
+            // ✅ 2) fallback — через cookie
+            if (!row || row.provider !== cfg.provider) {
                 if (!cookieState || cookieState !== state) {
                     return reply.code(400).send({ ok: false, error: "invalid state" });
                 }
@@ -143,11 +259,14 @@ async function authRoutes(app) {
                 // одноразовый state
                 await prisma.oAuthState.delete({ where: { state } });
             }
-            // чистим state-cookie (если был)
             reply.clearCookie("yandex_oauth_state", { path: "/" });
-            const redirectUri = `${baseUrlFromEnv()}/auth/yandex/callback`;
             stage = "token_exchange_fetch";
-            const token = await exchangeCodeForToken({ code, clientId, clientSecret, redirectUri });
+            const token = await exchangeCodeForToken({
+                code,
+                clientId: cfg.clientId,
+                clientSecret: cfg.clientSecret,
+                redirectUri: cfg.redirectUri
+            });
             stage = "userinfo_fetch";
             const info = await fetchYandexUserInfo(token.access_token);
             const yandexId = String(info.id);
@@ -164,8 +283,13 @@ async function authRoutes(app) {
                 where: { yandexId },
                 update: { yandexLogin, displayName, email, avatarUrl },
                 create: { yandexId, yandexLogin, displayName, email, avatarUrl },
-                select: { id: true }
+                select: { id: true, performerQrToken: true }
             });
+            // ✅ Персональный QR токен должен быть у каждого исполнителя.
+            // Генерируем при первой регистрации и догоним уже существующих пользователей.
+            if (!user.performerQrToken) {
+                await ensurePerformerQrToken(prisma, user.id);
+            }
             stage = "db_create_session";
             const rawSessionToken = randomToken();
             const tokenHash = sha256Hex(rawSessionToken);
@@ -175,25 +299,56 @@ async function authRoutes(app) {
                 data: { userId: user.id, tokenHash, expiresAt }
             });
             stage = "set_cookie_and_redirect";
+            const domain = cookieDomainForReq(req);
             reply.setCookie(cookieName(), rawSessionToken, {
                 httpOnly: true,
-                sameSite: "none",
                 secure: true,
+                sameSite: "lax",
                 path: "/",
-                expires: expiresAt
+                expires: expiresAt,
+                ...(domain ? { domain } : {})
             });
-            return reply.redirect(`${webUrlFromEnv()}/me`);
+            const fallbackNext = kind === "client" ? "/profile" : "/me";
+            const next = takeNextCookie(req, reply, fallbackNext);
+            return reply.redirect(`${cfg.webUrl}${next}`);
         }
         catch (err) {
-            app.log.error({ err, stage }, "auth yandex callback failed");
+            app.log.error({ err, stage, flow: kind }, "auth yandex callback failed");
             return reply.code(500).send({
                 ok: false,
                 error: "auth callback failed",
                 stage,
+                flow: kind,
                 message: err?.message ?? String(err)
             });
         }
-    });
+    }
+    // ========= New flows (separate apps) =========
+    /**
+     * GET /auth/yandex/client/start
+     */
+    app.get("/yandex/client/start", async (req, reply) => startFlow("client", req, reply));
+    /**
+     * GET /auth/yandex/client/callback
+     */
+    app.get("/yandex/client/callback", async (req, reply) => callbackFlow("client", req, reply));
+    /**
+     * GET /auth/yandex/web/start
+     */
+    app.get("/yandex/web/start", async (req, reply) => startFlow("web", req, reply));
+    /**
+     * GET /auth/yandex/web/callback
+     */
+    app.get("/yandex/web/callback", async (req, reply) => callbackFlow("web", req, reply));
+    // ========= Legacy (keep old behavior) =========
+    /**
+     * GET /auth/yandex/start  (legacy)
+     */
+    app.get("/yandex/start", async (req, reply) => startFlow("legacy", req, reply));
+    /**
+     * GET /auth/yandex/callback (legacy)
+     */
+    app.get("/yandex/callback", async (req, reply) => callbackFlow("legacy", req, reply));
     /**
      * GET /auth/me
      */
@@ -216,6 +371,7 @@ async function authRoutes(app) {
                         yandexLogin: true,
                         email: true,
                         avatarUrl: true,
+                        performerQrToken: true,
                         createdAt: true
                     }
                 }
@@ -228,22 +384,6 @@ async function authRoutes(app) {
             return reply.code(200).send({ ok: true, user: null });
         }
         return reply.send({ ok: true, user: session.user });
-    });
-    /**
-     * POST /auth/logout
-     */
-    app.post("/logout", async (req, reply) => {
-        const sessionToken = req.cookies?.[cookieName()] ?? "";
-        if (!sessionToken) {
-            reply.clearCookie(cookieName(), { path: "/" });
-            return reply.send({ ok: true });
-        }
-        const tokenHash = sha256Hex(String(sessionToken));
-        // @ts-expect-error prisma is decorated in server.ts
-        const prisma = app.prisma;
-        await prisma.session.deleteMany({ where: { tokenHash } }).catch(() => { });
-        reply.clearCookie(cookieName(), { path: "/" });
-        return reply.send({ ok: true });
     });
 }
 //# sourceMappingURL=auth.js.map
