@@ -4,6 +4,7 @@ dns.setDefaultResultOrder("ipv4first");
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
+import fastifyMultipart from "@fastify/multipart";
 import { prisma } from "./prisma";
 
 import { bookingsMeRoutes } from "./routes/bookings-me";
@@ -53,6 +54,12 @@ export function buildApp() {
 
   
 app.register(dashboardRoutes);
+
+app.register(fastifyMultipart, {
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB
+  },
+});
 
   // ✅ CORS + preflight
   app.register(cors, {
