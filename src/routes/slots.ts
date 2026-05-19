@@ -146,6 +146,7 @@ export async function slotsRoutes(app: FastifyInstance) {
             address: true,
             lat: true,
             lng: true,
+            logoUrl: true,
           },
         },
         bookings: {
@@ -226,6 +227,7 @@ export async function slotsRoutes(app: FastifyInstance) {
               address: true,
               lat: true,
               lng: true,
+              logoUrl: true,
             },
           },
           createdBy: {
