@@ -9,6 +9,7 @@ dns_1.default.setDefaultResultOrder("ipv4first");
 const fastify_1 = __importDefault(require("fastify"));
 const cookie_1 = __importDefault(require("@fastify/cookie"));
 const cors_1 = __importDefault(require("@fastify/cors"));
+const multipart_1 = __importDefault(require("@fastify/multipart"));
 const prisma_1 = require("./prisma");
 const bookings_me_1 = require("./routes/bookings-me");
 const slots_1 = require("./routes/slots");
@@ -51,6 +52,11 @@ function buildApp() {
     app.decorate("prisma", prisma_1.prisma);
     app.register(cookie_1.default);
     app.register(dashboard_1.dashboardRoutes);
+    app.register(multipart_1.default, {
+        limits: {
+            fileSize: 5 * 1024 * 1024, // 5MB
+        },
+    });
     // ✅ CORS + preflight
     app.register(cors_1.default, {
         origin: (origin, cb) => {
