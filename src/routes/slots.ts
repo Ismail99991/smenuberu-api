@@ -90,23 +90,28 @@ export async function slotsRoutes(app: FastifyInstance) {
     });
 
     return {
-      ok: true,
-      slots: list.map((s: any) => ({
-        id: s.id,
-        objectId: s.objectId,
-        title: s.title,
-        date: fmtISODateUTC(s.date),
-        startTime: fmtTimeUTC(s.startTime),
-        endTime: fmtTimeUTC(s.endTime),
-        city: s.object?.city ?? "",
-        address: s.object?.address ?? "",
-        time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
-        pay: s.pay,
-        hot: s.hot,
-        type: s.type,
-      })),
-    };
-  });
+  ok: true,
+  slots: list.map((s: any) => ({
+    id: s.id,
+    objectId: s.objectId,
+    title: s.title,
+    date: fmtISODateUTC(s.date),
+    startTime: fmtTimeUTC(s.startTime),
+    endTime: fmtTimeUTC(s.endTime),
+    city: s.object?.city ?? "",
+    address: s.object?.address ?? "",
+    time: `${fmtTimeUTC(s.startTime)}–${fmtTimeUTC(s.endTime)}`,
+    pay: s.pay,
+    hot: s.hot,
+    type: s.type,
+    object: {
+      name: s.object?.name ?? "",
+      logoUrl: s.object?.logoUrl ?? null,
+      city: s.object?.city ?? "",
+      address: s.object?.address ?? "",
+    },
+  })),
+};
 
   /**
    * GET /slots/created
