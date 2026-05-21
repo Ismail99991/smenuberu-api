@@ -2,12 +2,12 @@ name: Deploy to Yandex Cloud Function
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,30 +17,28 @@ jobs:
           node-version: '22'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build TypeScript
         run: npm run build
 
       - name: Install Yandex Cloud CLI
         run: |
-          curl -sSL https://storage.yandexcloud.net/yandexcloud/yc-install.sh | bash
-          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+          sudo apt-get update
+          sudo apt-get install -y curl gnupg
+          curl -sSL https://storage.yandexcloud.net/yandexcloud/debian/key.asc | sudo apt-key add -
+          echo "deb https://storage.yandexcloud.net/yandexcloud/debian/ stable main" | sudo tee /etc/apt/sources.list.d/yandex-cloud.list
+          sudo apt-get update
+          sudo apt-get install -y yc
 
       - name: Deploy to Yandex Cloud Function
         env:
           YC_SA_JSON_CREDENTIALS: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
           YC_FUNCTION_ID: ${{ secrets.YC_FUNCTION_ID }}
         run: |
-          # Сохраняем ключ в файл
           echo "$YC_SA_JSON_CREDENTIALS" > key.json
-          
-          # Авторизуемся через сервисный аккаунт
           yc config profile create sa-profile
           yc config set service-account-key key.json
-          yc config set folder-id $(cat key.json | jq -r '.folder_id')
-          
-          # Создаём ZIP-архив
           mkdir deploy-package
           cp index.js deploy-package/
           cp -r dist deploy-package/
@@ -48,11 +46,9 @@ jobs:
           cp package.json deploy-package/
           cp package-lock.json deploy-package/
           cd deploy-package
-          npm ci --production
+          npm install --production
           zip -r ../function.zip .
           cd ..
-          
-          # Деплоим функцию
           yc serverless function version create \
             --function-id $YC_FUNCTION_ID \
             --runtime nodejs-22 \
