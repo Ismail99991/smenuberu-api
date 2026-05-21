@@ -1,0 +1,32 @@
+name: Deploy to Yandex Cloud Function
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Deploy to Yandex Cloud Functions
+        uses: yc-actions/yc-sls-function@v1
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          function-id: ${{ secrets.YC_FUNCTION_ID }}
+          runtime: 'nodejs-22'
+          entrypoint: 'index.handler'
+          memory: '512mb'
+          execution-timeout: '10s'
