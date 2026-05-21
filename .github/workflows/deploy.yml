@@ -7,6 +7,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -21,12 +22,41 @@ jobs:
       - name: Build TypeScript
         run: npm run build
 
-      - name: Deploy to Yandex Cloud Functions
-        uses: yc-actions/yc-sls-function@v1
-        with:
-          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
-          function-id: ${{ secrets.YC_FUNCTION_ID }}
-          runtime: 'nodejs-22'
-          entrypoint: 'index.handler'
-          memory: '512mb'
-          execution-timeout: '10s'
+      - name: Install Yandex Cloud CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud/yc-install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+
+      - name: Deploy to Yandex Cloud Function
+        env:
+          YC_SA_JSON_CREDENTIALS: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          YC_FUNCTION_ID: ${{ secrets.YC_FUNCTION_ID }}
+        run: |
+          # Сохраняем ключ в файл
+          echo "$YC_SA_JSON_CREDENTIALS" > key.json
+          
+          # Авторизуемся через сервисный аккаунт
+          yc config profile create sa-profile
+          yc config set service-account-key key.json
+          yc config set folder-id $(cat key.json | jq -r '.folder_id')
+          
+          # Создаём ZIP-архив
+          mkdir deploy-package
+          cp index.js deploy-package/
+          cp -r dist deploy-package/
+          cp -r prisma deploy-package/
+          cp package.json deploy-package/
+          cp package-lock.json deploy-package/
+          cd deploy-package
+          npm ci --production
+          zip -r ../function.zip .
+          cd ..
+          
+          # Деплоим функцию
+          yc serverless function version create \
+            --function-id $YC_FUNCTION_ID \
+            --runtime nodejs-22 \
+            --entrypoint index.handler \
+            --memory 512m \
+            --execution-timeout 10s \
+            --source-path ./function.zip
