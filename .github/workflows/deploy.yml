@@ -2,7 +2,7 @@ name: Deploy to Yandex Cloud Function
 
 on:
   push:
-    branches: [main, master]
+    branches: [ main, master ]
 
 jobs:
   deploy:
@@ -24,21 +24,23 @@ jobs:
 
       - name: Install Yandex Cloud CLI
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl gnupg
-          curl -sSL https://storage.yandexcloud.net/yandexcloud/debian/key.asc | sudo apt-key add -
-          echo "deb https://storage.yandexcloud.net/yandexcloud/debian/ stable main" | sudo tee /etc/apt/sources.list.d/yandex-cloud.list
-          sudo apt-get update
-          sudo apt-get install -y yc
+          curl -sSL https://github.com/yandex-cloud/yccli/releases/latest/download/yc-linux-amd64.tar.gz | tar xz
+          sudo mv yc /usr/local/bin/
+          yc version
 
       - name: Deploy to Yandex Cloud Function
         env:
           YC_SA_JSON_CREDENTIALS: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
           YC_FUNCTION_ID: ${{ secrets.YC_FUNCTION_ID }}
         run: |
+          # Сохраняем ключ сервисного аккаунта
           echo "$YC_SA_JSON_CREDENTIALS" > key.json
-          yc config profile create sa-profile
+          
+          # Указываем путь к ключу
           yc config set service-account-key key.json
+          yc config set folder-id $(jq -r .folder_id key.json)
+          
+          # Создаем архив для деплоя
           mkdir deploy-package
           cp index.js deploy-package/
           cp -r dist deploy-package/
@@ -49,6 +51,8 @@ jobs:
           npm install --production
           zip -r ../function.zip .
           cd ..
+          
+          # Деплоим функцию
           yc serverless function version create \
             --function-id $YC_FUNCTION_ID \
             --runtime nodejs-22 \
