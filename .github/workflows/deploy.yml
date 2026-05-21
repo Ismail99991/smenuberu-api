@@ -22,25 +22,19 @@ jobs:
       - name: Build TypeScript
         run: npm run build
 
-      - name: Install Yandex Cloud CLI
+      - name: Install Yandex Cloud CLI via pip
         run: |
-          curl -sSL https://github.com/yandex-cloud/yccli/releases/latest/download/yc-linux-amd64.tar.gz | tar xz
-          sudo mv yc /usr/local/bin/
-          yc version
+          pip install yandexcloud --upgrade
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Deploy to Yandex Cloud Function
         env:
           YC_SA_JSON_CREDENTIALS: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
           YC_FUNCTION_ID: ${{ secrets.YC_FUNCTION_ID }}
         run: |
-          # Сохраняем ключ сервисного аккаунта
           echo "$YC_SA_JSON_CREDENTIALS" > key.json
-          
-          # Указываем путь к ключу
           yc config set service-account-key key.json
           yc config set folder-id $(jq -r .folder_id key.json)
-          
-          # Создаем архив для деплоя
           mkdir deploy-package
           cp index.js deploy-package/
           cp -r dist deploy-package/
@@ -51,8 +45,6 @@ jobs:
           npm install --production
           zip -r ../function.zip .
           cd ..
-          
-          # Деплоим функцию
           yc serverless function version create \
             --function-id $YC_FUNCTION_ID \
             --runtime nodejs-22 \
