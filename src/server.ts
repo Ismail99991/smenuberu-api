@@ -15,6 +15,7 @@ import { authRoutes } from "./routes/auth";
 import { uploadsRoutes } from "./routes/uploads";
 import { geoRoutes } from "./routes/geo";
 import { dashboardRoutes } from "./routes/dashboard";
+import checkNpdRoute from "./routes/check-npd"; // ✅ добавлено
 
 function isAllowedOrigin(origin: string) {
   // allow localhost
@@ -151,6 +152,7 @@ export function buildApp() {
   app.register(bookingsMeRoutes, { prefix: "/bookings" });
   app.register(uploadsRoutes, { prefix: "/uploads" });
   app.register(geoRoutes, { prefix: "/geo" });
+  app.register(checkNpdRoute); // ✅ добавлено
 
   app.addHook("onClose", async () => {
     await prisma.$disconnect();
