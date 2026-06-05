@@ -451,7 +451,9 @@ export async function authRoutes(app: FastifyInstance) {
             email: true,
             avatarUrl: true,
             performerQrToken: true,
-            createdAt: true
+            createdAt: true,
+            isSelfEmployed: true,
+            selfEmployedVerifiedAt: true
           }
         }
       }
