@@ -20,6 +20,12 @@ model User {
   avatarUrl   String?
   email       String?
 
+  // НПД (самозанятость)
+  isSelfEmployed          Boolean?  @default(false)
+  selfEmployedInn         String?   @unique
+  selfEmployedVerifiedAt  DateTime?
+  selfEmployedStatusDate  String?
+
   // ✅ Персональный QR исполнителя (генерируется при регистрации)
   // nullable + unique: в Postgres это ок (много NULL допускается)
   performerQrToken String? @unique
