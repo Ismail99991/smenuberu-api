@@ -5,8 +5,13 @@ interface CheckNpdRequest {
 }
 
 interface FnsApiResponse {
-  status: boolean;      // true — самозанятый, false — нет
+  status: boolean;
   message: string;
+}
+
+interface FnsErrorResponse {
+  code?: string;
+  message?: string;
 }
 
 export default async function checkNpdRoute(fastify: FastifyInstance) {
@@ -26,11 +31,11 @@ export default async function checkNpdRoute(fastify: FastifyInstance) {
       // Текущая дата в формате YYYY-MM-DD
       const today = new Date().toISOString().split('T')[0];
 
-      // Новый актуальный API ФНС
+      // API ФНС
       const fnsUrl = 'https://statusnpd.nalog.ru/api/v1/tracker/taxpayer_status';
       
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // таймаут 30 секунд (по документации не менее 60, но 30 достаточно)
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
 
       const response = await fetch(fnsUrl, {
         method: 'POST',
@@ -46,9 +51,9 @@ export default async function checkNpdRoute(fastify: FastifyInstance) {
 
       clearTimeout(timeoutId);
 
-      // Обработка HTTP ошибок
+      // Обработка ошибки 422 (business error)
       if (response.status === 422) {
-        const errorData = await response.json();
+        const errorData = await response.json() as FnsErrorResponse;
         return reply.code(422).send({
           success: false,
           message: errorData.message || 'Ошибка проверки. Проверьте правильность ИНН.',
@@ -56,6 +61,7 @@ export default async function checkNpdRoute(fastify: FastifyInstance) {
         });
       }
 
+      // Обработка rate limit
       if (response.status === 429) {
         return reply.code(429).send({
           success: false,
@@ -64,6 +70,7 @@ export default async function checkNpdRoute(fastify: FastifyInstance) {
         });
       }
 
+      // Другие ошибки HTTP
       if (!response.ok) {
         return reply.code(503).send({
           success: false,
@@ -72,7 +79,8 @@ export default async function checkNpdRoute(fastify: FastifyInstance) {
         });
       }
 
-      const fnsData: FnsApiResponse = await response.json();
+      // Успешный ответ — парсим JSON
+      const fnsData = await response.json() as FnsApiResponse;
       const isSelfEmployed = fnsData.status === true;
 
       return reply.send({
