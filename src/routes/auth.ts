@@ -468,4 +468,28 @@ export async function authRoutes(app: FastifyInstance) {
 
     return reply.send({ ok: true, user: session.user });
   });
+    /**
+   * POST /auth/logout
+   * Выход из аккаунта
+   */
+  app.post("/logout", async (req, reply) => {
+    const sessionToken = (req.cookies as any)?.[cookieName()] ?? "";
+    
+    if (sessionToken) {
+      const tokenHash = sha256Hex(String(sessionToken));
+      const prisma = (app as any).prisma;
+      
+      await prisma.session.deleteMany({
+        where: { tokenHash }
+      }).catch(() => {});
+    }
+    
+    const domain = cookieDomainForReq(req);
+    reply.clearCookie(cookieName(), {
+      path: "/",
+      ...(domain ? { domain } : {})
+    });
+    
+    return reply.send({ ok: true });
+  });
 }
