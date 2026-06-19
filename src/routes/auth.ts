@@ -5,20 +5,42 @@ function normalizeBaseUrl(u: string) {
   return String(u).replace(/\/+$/, "");
 }
 
+/**
+ * API base URL (backend itself)
+ */
 function baseUrlFromEnv() {
-  return normalizeBaseUrl(process.env.API_BASE_URL ?? "https://api.smenube.ru");
+  return normalizeBaseUrl(
+    process.env.API_BASE_URL ?? "https://api.smenube.ru"
+  );
 }
 
-function webUrlFromEnvDefault() {
-  return normalizeBaseUrl(process.env.WEB_URL ?? "https://www.smenube.ru");
+/**
+ * MAIN FRONTEND (APP)
+ * ❗ canonical domain ONLY, no www fallback
+ */
+function webUrlFromEnv() {
+  return normalizeBaseUrl(
+    process.env.WEB_URL ?? "https://smenube.ru"
+  );
 }
 
+/**
+ * CLIENT APP
+ */
 function clientWebUrlFromEnv() {
-  return normalizeBaseUrl(process.env.CLIENT_WEB_URL ?? "https://client.smenube.ru");
+  return normalizeBaseUrl(
+    process.env.CLIENT_WEB_URL ?? "https://client.smenube.ru"
+  );
 }
 
+/**
+ * OPTIONAL: if you really have second frontend (admin/dashboard/etc)
+ * BUT DO NOT default to www or old domains
+ */
 function webWebUrlFromEnv() {
-  return normalizeBaseUrl(process.env.WEB_WEB_URL ?? webUrlFromEnvDefault());
+  return normalizeBaseUrl(
+    process.env.WEB_WEB_URL ?? webUrlFromEnv()
+  );
 }
 
 function cookieName() {
